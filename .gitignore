@@ -1,0 +1,9 @@
+data/iam/
+__pycache__/
+checkpoints/
+checkpoints/
+example_train_data/
+
+*.tgz
+*.txt
+*.png
