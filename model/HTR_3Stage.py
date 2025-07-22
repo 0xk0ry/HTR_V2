@@ -475,7 +475,7 @@ class HTRModel(nn.Module):
         )
 
         # CTC Loss
-        self.ctc_loss = CTCLoss(blank=0, reduction='none', zero_infinity=True)
+        self.ctc_loss = CTCLoss(blank=0, reduction='mean', zero_infinity=True)
 
     def _average_overlap_features(self, features1, features2, overlap_patches):
         """Average features in overlap regions for smoother transitions
