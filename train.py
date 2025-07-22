@@ -217,7 +217,7 @@ def ctc_decode_greedy(logits, vocab):
     return decoded_texts
 
 
-def train_epoch(model, dataloader, optimizer, device, vocab, use_sam=False):
+def train_epoch(model, dataloader, optimizer, device, vocab, use_sam=False, gradient_clip=1.0, print_frequency=10):
     """Train for one epoch"""
     model.train()
     total_loss = 0
@@ -240,6 +240,9 @@ def train_epoch(model, dataloader, optimizer, device, vocab, use_sam=False):
                 optimizer.zero_grad()
                 logits, loss = model(images, targets_flat, target_lengths)
                 loss.backward()
+                # Gradient clipping
+                if gradient_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
                 return loss
 
             loss = optimizer.step(closure)
@@ -248,19 +251,28 @@ def train_epoch(model, dataloader, optimizer, device, vocab, use_sam=False):
             logits, loss = model(images, targets_flat, target_lengths)
             optimizer.zero_grad()
             loss.backward()
+            
+            # Gradient clipping
+            if gradient_clip > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
+            
             optimizer.step()
         else:
             optimizer.zero_grad()
             logits, loss = model(images, targets_flat, target_lengths)
             loss.backward()
+            
+            # Gradient clipping
+            if gradient_clip > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
+            
             optimizer.step()
 
         total_loss += loss.item()
         num_batches += 1
 
-        if batch_idx % 10 == 0:
-            print(
-                f'Batch {batch_idx}/{len(dataloader)}, Loss: {loss.item():.4f}')
+        if batch_idx % print_frequency == 0:
+            print(f'Batch {batch_idx}/{len(dataloader)}, Loss: {loss.item():.4f}')
 
     return total_loss / num_batches
 
@@ -315,51 +327,80 @@ def validate(model, dataloader, device, vocab):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Train HTR model')
-    parser.add_argument('--data_dir', type=str,
-                        required=True, help='Path to training data')
-    parser.add_argument('--val_data_dir', type=str,
-                        help='Path to validation data')
-    parser.add_argument('--output_dir', type=str,
-                        default='./checkpoints', help='Output directory')
-    parser.add_argument('--epochs', type=int, default=100,
-                        help='Number of epochs')
+    parser = argparse.ArgumentParser(description='Train HTR 3-Stage Model')
+    
+    # Data arguments
+    parser.add_argument('--data_dir', type=str, required=True, help='Training data directory')
+    parser.add_argument('--val_data_dir', type=str, help='Validation data directory')
+    parser.add_argument('--augment', action='store_true', help='Enable data augmentation')
+    
+    # Training arguments
+    parser.add_argument('--epochs', type=int, default=100, help='Number of epochs')
     parser.add_argument('--batch_size', type=int, default=8, help='Batch size')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
+    parser.add_argument('--weight_decay', type=float, default=0.01, help='Weight decay')
+    parser.add_argument('--betas', type=float, nargs=2, default=[0.9, 0.999], help='Adam betas')
+    
+    # Optimizer arguments
+    parser.add_argument('--base_optimizer', choices=['adamw', 'adam', 'sgd'], default='adamw',
+                        help='Base optimizer type')
+    parser.add_argument('--use_sam', action='store_true', help='Use SAM optimizer')
+    parser.add_argument('--sam_rho', type=float, default=0.05, help='SAM rho parameter')
+    parser.add_argument('--sam_adaptive', action='store_true', help='Use adaptive SAM')
+    
+    # Scheduler arguments
+    parser.add_argument('--use_scheduler', action='store_true', help='Use learning rate scheduler')
+    parser.add_argument('--scheduler_type', choices=['cosine', 'step'], default='cosine',
+                        help='Type of learning rate scheduler')
+    parser.add_argument('--warmup_epochs', type=int, default=10, help='Warmup epochs')
+    parser.add_argument('--scheduler_patience', type=int, default=10, help='Scheduler patience for plateau')
+    
+    # Model arguments
     parser.add_argument('--resume', type=str, help='Resume from checkpoint')
-    parser.add_argument('--lm_path', type=str,
-                        help='Path to KenLM language model')
-
-    # Data augmentation options
-    parser.add_argument('--augment', action='store_true',
-                        help='Enable data augmentation for training')
-
-    # SAM optimizer options
-    parser.add_argument('--use_sam', action='store_true',
-                        help='Use SAM (Sharpness-Aware Minimization) optimizer')
-    parser.add_argument('--sam_rho', type=float, default=0.05,
-                        help='SAM rho parameter (neighborhood size)')
-    parser.add_argument('--sam_adaptive', action='store_true',
-                        help='Use adaptive SAM')
-    parser.add_argument('--base_optimizer', type=str, default='adamw',
-                        choices=['adamw', 'adam', 'sgd'],
-                        help='Base optimizer for SAM')
+    parser.add_argument('--save_dir', type=str, default='./checkpoints', help='Checkpoint save directory')
+    parser.add_argument('--save_frequency', type=int, default=10, help='Save checkpoint every N epochs')
+    
+    # Advanced training options
+    parser.add_argument('--gradient_clip', type=float, default=1.0, help='Gradient clipping value')
+    parser.add_argument('--early_stopping', type=int, default=20, help='Early stopping patience (0=disabled)')
+    parser.add_argument('--print_frequency', type=int, default=10, help='Print frequency during training')
 
     args = parser.parse_args()
 
-    # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
+    # Create save directory
+    os.makedirs(args.save_dir, exist_ok=True)
 
     # Device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
+    
+    # Print configuration
+    print("\n" + "="*60)
+    print("HTR 3-Stage Model Training Configuration")
+    print("="*60)
+    print(f"Data directory: {args.data_dir}")
+    print(f"Validation directory: {args.val_data_dir}")
+    print(f"Save directory: {args.save_dir}")
+    print(f"Epochs: {args.epochs}")
+    print(f"Batch size: {args.batch_size}")
+    print(f"Learning rate: {args.lr}")
+    print(f"Weight decay: {args.weight_decay}")
+    print(f"Optimizer: {args.base_optimizer.upper()}")
+    print(f"Betas: {tuple(args.betas)}")
+    print(f"Data augmentation: {'Enabled' if args.augment else 'Disabled'}")
+    if args.use_sam:
+        print(f"SAM optimizer: Enabled (rho={args.sam_rho}, adaptive={args.sam_adaptive})")
+    if args.use_scheduler:
+        print(f"Scheduler: {args.scheduler_type} (warmup_epochs={args.warmup_epochs})")
+    print(f"Gradient clipping: {args.gradient_clip}")
+    print("="*60)
 
     # Create vocabulary
     vocab = create_vocab()
     print(f"Vocabulary size: {len(vocab)}")
 
     # Save vocabulary
-    with open(os.path.join(args.output_dir, 'vocab.json'), 'w') as f:
+    with open(os.path.join(args.save_dir, 'vocab.json'), 'w') as f:
         json.dump(vocab, f, indent=2)
 
     # Create model
@@ -376,7 +417,6 @@ def main():
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     # Create datasets
-    print(f"Data augmentation: {'Enabled' if args.augment else 'Disabled'}")
     train_dataset = HTRDataset(args.data_dir, vocab, augment=args.augment)
     train_loader = DataLoader(
         train_dataset,
@@ -398,35 +438,77 @@ def main():
             num_workers=4
         )
 
-    # Optimizer and scheduler
+    # Base optimizer classes
+    base_optimizers = {
+        'adamw': optim.AdamW,
+        'adam': optim.Adam,
+        'sgd': optim.SGD
+    }
+
+    # Create optimizer with improved configuration
     if args.use_sam:
         print(f"Using SAM optimizer with {args.base_optimizer.upper()} base")
-        print(f"SAM rho: {args.sam_rho}, adaptive: {args.sam_adaptive}")
-
-        # Create base optimizer class
-        base_optimizers = {
-            'adamw': optim.AdamW,
-            'adam': optim.Adam,
-            'sgd': optim.SGD
-        }
-        base_optimizer_class = base_optimizers[args.base_optimizer]
-
-        # Create SAM optimizer
-        optimizer = SAM(
-            model.parameters(),
-            base_optimizer_class,
-            lr=args.lr,
-            weight_decay=0.01,
-            rho=args.sam_rho,
-            adaptive=args.sam_adaptive
-        )
+        
+        if args.base_optimizer in ['adamw', 'adam']:
+            optimizer = SAM(
+                model.parameters(),
+                base_optimizers[args.base_optimizer],
+                lr=args.lr,
+                betas=tuple(args.betas),
+                weight_decay=args.weight_decay,
+                rho=args.sam_rho,
+                adaptive=args.sam_adaptive
+            )
+        else:  # SGD
+            optimizer = SAM(
+                model.parameters(),
+                base_optimizers[args.base_optimizer],
+                lr=args.lr,
+                weight_decay=args.weight_decay,
+                momentum=0.9,
+                rho=args.sam_rho,
+                adaptive=args.sam_adaptive
+            )
     else:
-        print("Using standard AdamW optimizer")
-        optimizer = optim.AdamW(
-            model.parameters(), lr=args.lr, weight_decay=0.01)
+        if args.base_optimizer == 'adamw':
+            optimizer = optim.AdamW(
+                model.parameters(), 
+                lr=args.lr, 
+                betas=tuple(args.betas),
+                weight_decay=args.weight_decay
+            )
+        elif args.base_optimizer == 'adam':
+            optimizer = optim.Adam(
+                model.parameters(), 
+                lr=args.lr, 
+                betas=tuple(args.betas),
+                weight_decay=args.weight_decay
+            )
+        elif args.base_optimizer == 'sgd':
+            optimizer = optim.SGD(
+                model.parameters(), 
+                lr=args.lr, 
+                weight_decay=args.weight_decay, 
+                momentum=0.9
+            )
 
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=args.epochs)
+    # Learning rate scheduler
+    scheduler = None
+    if args.use_scheduler:
+        if args.scheduler_type == 'cosine':
+            scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=args.epochs, eta_min=args.lr * 0.01
+            )
+        elif args.scheduler_type == 'step':
+            scheduler = optim.lr_scheduler.StepLR(
+                optimizer, step_size=args.epochs // 3, gamma=0.1
+            )
+        print(f"Using {args.scheduler_type} learning rate scheduler")
+    else:
+        # Default cosine scheduler for backward compatibility
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=args.epochs, eta_min=args.lr * 0.01
+        )
 
     # Resume from checkpoint if specified
     start_epoch = 0
@@ -437,48 +519,99 @@ def main():
         start_epoch = checkpoint['epoch'] + 1
         print(f"Resumed from epoch {start_epoch}")
 
-    # Training loop
+    # Training loop with improved features
     best_val_loss = float('inf')
+    patience_counter = 0
+    train_losses = []
+    val_losses = []
+
+    print(f"\nStarting training for {args.epochs} epochs...")
+    print(f"Training samples: {len(train_dataset)}")
+    if val_loader:
+        print(f"Validation samples: {len(val_dataset)}")
 
     for epoch in range(start_epoch, args.epochs):
-        print(f"\\nEpoch {epoch + 1}/{args.epochs}")
+        print(f"\nEpoch {epoch + 1}/{args.epochs}")
         print("-" * 50)
 
         # Train
         train_loss = train_epoch(
-            model, train_loader, optimizer, device, vocab, use_sam=args.use_sam)
+            model, train_loader, optimizer, device, vocab, 
+            use_sam=args.use_sam, gradient_clip=args.gradient_clip,
+            print_frequency=args.print_frequency
+        )
+        train_losses.append(train_loss)
         print(f"Train Loss: {train_loss:.4f}")
 
         # Validate
         if val_loader:
             val_loss, char_acc = validate(model, val_loader, device, vocab)
+            val_losses.append(val_loss)
             print(f"Val Loss: {val_loss:.4f}, Char Accuracy: {char_acc:.4f}")
         else:
             val_loss = train_loss
+            val_losses.append(val_loss)
 
-        # Save checkpoint
-        checkpoint = {
-            'epoch': epoch,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'train_loss': train_loss,
-            'val_loss': val_loss,
-            'vocab': vocab
-        }
+        # Learning rate scheduling
+        if scheduler:
+            if args.scheduler_type == 'plateau':
+                scheduler.step(val_loss)
+            else:
+                scheduler.step()
+            
+            current_lr = scheduler.get_last_lr()[0] if hasattr(scheduler, 'get_last_lr') else args.lr
+            print(f"Learning rate: {current_lr:.6f}")
 
-        torch.save(checkpoint, os.path.join(
-            args.output_dir, f'checkpoint_epoch_{epoch}.pth'))
+        # Save checkpoint periodically
+        if (epoch + 1) % args.save_frequency == 0:
+            checkpoint = {
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
+                'train_loss': train_loss,
+                'val_loss': val_loss,
+                'train_losses': train_losses,
+                'val_losses': val_losses,
+                'vocab': vocab,
+                'args': vars(args)
+            }
+
+            torch.save(checkpoint, os.path.join(
+                args.save_dir, f'checkpoint_epoch_{epoch}.pth'))
 
         # Save best model
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save(checkpoint, os.path.join(
-                args.output_dir, 'best_model.pth'))
-            print(f"New best model saved with val loss: {val_loss:.4f}")
+            patience_counter = 0
+            
+            best_checkpoint = {
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
+                'train_loss': train_loss,
+                'val_loss': val_loss,
+                'train_losses': train_losses,
+                'val_losses': val_losses,
+                'vocab': vocab,
+                'args': vars(args)
+            }
+            
+            torch.save(best_checkpoint, os.path.join(
+                args.save_dir, 'best_model.pth'))
+            print(f"🎯 New best model saved! Val loss: {val_loss:.4f}")
+        else:
+            patience_counter += 1
 
-        # Update learning rate
-        scheduler.step()
-        print(f"Learning rate: {scheduler.get_last_lr()[0]:.6f}")
+        # Early stopping
+        if args.early_stopping > 0 and patience_counter >= args.early_stopping:
+            print(f"\n⏹️  Early stopping triggered after {patience_counter} epochs without improvement")
+            break
+
+    print(f"\n✅ Training completed!")
+    print(f"Best validation loss: {best_val_loss:.4f}")
+    print(f"Final model saved to: {args.save_dir}/best_model.pth")
 
 
 if __name__ == "__main__":
