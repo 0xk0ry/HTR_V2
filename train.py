@@ -17,7 +17,7 @@ import argparse
 import sys
 import torchvision.transforms as transforms
 from data.transform import (
-    Erosion, Dilation, ElasticDistortion, 
+    Erosion, Dilation, ElasticDistortion,
     RandomTransform, GaussianNoise
 )
 sys.path.append('.')
@@ -26,36 +26,74 @@ sys.path.append('.')
 class HTRDataset(Dataset):
     """Dataset class for HTR training"""
 
-    def __init__(self, data_dir, vocab, max_length=256, target_height=64, augment=False):
+    def __init__(self, data_dir, vocab, split='train', max_length=256, target_height=64, augment=False):
         self.data_dir = Path(data_dir)
         self.vocab = vocab
         self.char_to_idx = {char: idx for idx, char in enumerate(vocab)}
         self.max_length = max_length
         self.target_height = target_height
         self.augment = augment
+        self.split = split  # 'train', 'valid', or 'test'
 
         # Load dataset annotations
         self.samples = self._load_samples()
-        
+
         # Setup data augmentation transforms
         self._setup_augmentation()
 
     def _load_samples(self):
-        """Load image paths and corresponding texts"""
+        """Load image paths and corresponding texts from pickle file or fallback methods"""
         samples = []
 
-        # Look for annotation file
-        annotation_file = self.data_dir / "annotations.json"
-        if annotation_file.exists():
-            with open(annotation_file, 'r', encoding='utf-8') as f:
-                annotations = json.load(f)
-                for item in annotations:
-                    samples.append({
-                        'image_path': self.data_dir / item['image'],
-                        'text': item['text']
-                    })
-        else:
-            # Fallback: look for paired image/txt files (.png, .jpg, .jpeg)
+        # First try to load from pickle file (labels.pkl)
+        pkl_file = self.data_dir / "labels.pkl"
+        if pkl_file.exists():
+            print(f"Loading samples from pickle file: {pkl_file}")
+            try:
+                import pickle
+                with open(pkl_file, 'rb') as f:
+                    data = pickle.load(f)
+
+                # Check if this pickle file has the expected structure
+                if 'ground_truth' in data and self.split in data['ground_truth']:
+                    ground_truth = data['ground_truth'][self.split]
+
+                    for image_name, label_data in ground_truth.items():
+                        # Handle both formats: direct text or nested dict with 'text' key
+                        if isinstance(label_data, dict) and 'text' in label_data:
+                            text = label_data['text']
+                        elif isinstance(label_data, str):
+                            text = label_data
+                        else:
+                            print(
+                                f"Warning: Unexpected label format for {image_name}: {label_data}")
+                            continue
+
+                        # Construct image path
+                        image_path = self.data_dir / self.split / image_name
+
+                        # Check if image file exists
+                        if image_path.exists():
+                            samples.append({
+                                'image_path': image_path,
+                                'text': text
+                            })
+                        else:
+                            print(
+                                f"Warning: Image file not found: {image_path}")
+
+                    print(
+                        f"Loaded {len(samples)} samples from pickle file for split '{self.split}'")
+                else:
+                    print(
+                        f"Warning: Split '{self.split}' not found in pickle file. Available keys: {list(data.get('ground_truth', {}).keys())}")
+
+            except Exception as e:
+                print(f"Error loading pickle file: {e}")
+                print("Falling back to other loading methods...")
+
+        if not samples:
+            print("Loading samples from paired image/text files...")
             image_extensions = ['*.png', '*.jpg', '*.jpeg']
             for ext in image_extensions:
                 for img_file in self.data_dir.glob(ext):
@@ -68,7 +106,8 @@ class HTRDataset(Dataset):
                             'text': text
                         })
 
-        print(f"Loaded {len(samples)} samples from {self.data_dir}")
+        print(
+            f"Loaded {len(samples)} samples from {self.data_dir} (split: {self.split})")
         return samples
 
     def _setup_augmentation(self):
@@ -76,12 +115,12 @@ class HTRDataset(Dataset):
         if not self.augment:
             self.aug_transforms = []
             return
-            
+
         # Each transform is applied with p=0.5 and can be combined
         self.aug_transforms = [
             # Random affine transforms (using RandomTransform from transform.py)
             transforms.RandomApply([RandomTransform(val=10)], p=0.5),
-            
+
             # Erosion & Dilation
             transforms.RandomApply([
                 transforms.RandomChoice([
@@ -89,17 +128,17 @@ class HTRDataset(Dataset):
                     Dilation(kernel=(2, 2), iterations=1)
                 ])
             ], p=0.5),
-            
+
             # Color jitter (using GaussianNoise for better greyscale compatibility)
             transforms.RandomApply([
                 GaussianNoise(std=0.1)
             ], p=0.5),
-            
+
             # Elastic distortion
             transforms.RandomApply([
                 ElasticDistortion(
-                    grid=(6, 6), 
-                    magnitude=(8, 8), 
+                    grid=(6, 6),
+                    magnitude=(8, 8),
                     min_sep=(2, 2)
                 )
             ], p=0.5),
@@ -124,7 +163,7 @@ class HTRDataset(Dataset):
         if self.augment:
             for transform in self.aug_transforms:
                 image = transform(image)
-                
+
             # Ensure image is still the correct size after augmentation
             # Some transforms might change dimensions slightly
             current_w, current_h = image.size
@@ -132,7 +171,8 @@ class HTRDataset(Dataset):
                 # Resize back to target height, maintaining aspect ratio
                 aspect_ratio = current_w / current_h
                 new_width = int(self.target_height * aspect_ratio)
-                image = image.resize((new_width, self.target_height), Image.LANCZOS)
+                image = image.resize(
+                    (new_width, self.target_height), Image.LANCZOS)
 
         # Convert to tensor and normalize for greyscale
         image_array = np.array(image) / 255.0
@@ -188,9 +228,37 @@ def collate_fn(batch):
     return images, texts, text_lengths
 
 
-def create_vocab():
+def create_vocab(data_dir=None):
     """Create vocabulary for the model"""
-    # Use the default vocabulary from the 3-stage model
+
+    # Try to load vocabulary from pickle file first
+    if data_dir:
+        pkl_file = Path(data_dir) / "labels.pkl"
+        if pkl_file.exists():
+            try:
+                import pickle
+                with open(pkl_file, 'rb') as f:
+                    data = pickle.load(f)
+
+                if 'charset' in data:
+                    vocab = list(data['charset'])
+                    # Ensure blank token is at index 0
+                    if '' not in vocab:
+                        vocab.insert(0, '')  # Add blank token at index 0
+                    elif vocab[0] != '':
+                        vocab.remove('')
+                        vocab.insert(0, '')  # Move blank token to index 0
+
+                    print(
+                        f"Loaded vocabulary from pickle file: {len(vocab)} characters")
+                    return vocab
+                else:
+                    print("Warning: 'charset' not found in pickle file")
+            except Exception as e:
+                print(f"Error loading vocabulary from pickle file: {e}")
+
+    # Fallback to default vocabulary
+    print("Using default vocabulary")
     return DEFAULT_VOCAB
 
 
@@ -242,7 +310,8 @@ def train_epoch(model, dataloader, optimizer, device, vocab, use_sam=False, grad
                 loss.backward()
                 # Gradient clipping
                 if gradient_clip > 0:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), gradient_clip)
                 return loss
 
             loss = optimizer.step(closure)
@@ -251,28 +320,31 @@ def train_epoch(model, dataloader, optimizer, device, vocab, use_sam=False, grad
             logits, loss = model(images, targets_flat, target_lengths)
             optimizer.zero_grad()
             loss.backward()
-            
+
             # Gradient clipping
             if gradient_clip > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
-            
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), gradient_clip)
+
             optimizer.step()
         else:
             optimizer.zero_grad()
             logits, loss = model(images, targets_flat, target_lengths)
             loss.backward()
-            
+
             # Gradient clipping
             if gradient_clip > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
-            
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), gradient_clip)
+
             optimizer.step()
 
         total_loss += loss.item()
         num_batches += 1
 
         if batch_idx % print_frequency == 0:
-            print(f'Batch {batch_idx}/{len(dataloader)}, Loss: {loss.item():.4f}')
+            print(
+                f'Batch {batch_idx}/{len(dataloader)}, Loss: {loss.item():.4f}')
 
     return total_loss / num_batches
 
@@ -328,42 +400,57 @@ def validate(model, dataloader, device, vocab):
 
 def main():
     parser = argparse.ArgumentParser(description='Train HTR 3-Stage Model')
-    
+
     # Data arguments
-    parser.add_argument('--data_dir', type=str, required=True, help='Training data directory')
-    parser.add_argument('--val_data_dir', type=str, help='Validation data directory')
-    parser.add_argument('--augment', action='store_true', help='Enable data augmentation')
-    
+    parser.add_argument('--data_dir', type=str, required=True,
+                        help='Data directory containing labels.pkl and train/valid/test splits')
+    parser.add_argument('--augment', action='store_true',
+                        help='Enable data augmentation')
+
     # Training arguments
-    parser.add_argument('--epochs', type=int, default=100, help='Number of epochs')
+    parser.add_argument('--epochs', type=int, default=100,
+                        help='Number of epochs')
     parser.add_argument('--batch_size', type=int, default=8, help='Batch size')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
-    parser.add_argument('--weight_decay', type=float, default=0.01, help='Weight decay')
-    parser.add_argument('--betas', type=float, nargs=2, default=[0.9, 0.999], help='Adam betas')
-    
+    parser.add_argument('--weight_decay', type=float,
+                        default=0.01, help='Weight decay')
+    parser.add_argument('--betas', type=float, nargs=2,
+                        default=[0.9, 0.999], help='Adam betas')
+
     # Optimizer arguments
     parser.add_argument('--base_optimizer', choices=['adamw', 'adam', 'sgd'], default='adamw',
                         help='Base optimizer type')
-    parser.add_argument('--use_sam', action='store_true', help='Use SAM optimizer')
-    parser.add_argument('--sam_rho', type=float, default=0.05, help='SAM rho parameter')
-    parser.add_argument('--sam_adaptive', action='store_true', help='Use adaptive SAM')
-    
+    parser.add_argument('--use_sam', action='store_true',
+                        help='Use SAM optimizer')
+    parser.add_argument('--sam_rho', type=float,
+                        default=0.05, help='SAM rho parameter')
+    parser.add_argument('--sam_adaptive', action='store_true',
+                        help='Use adaptive SAM')
+
     # Scheduler arguments
-    parser.add_argument('--use_scheduler', action='store_true', help='Use learning rate scheduler')
+    parser.add_argument('--use_scheduler', action='store_true',
+                        help='Use learning rate scheduler')
     parser.add_argument('--scheduler_type', choices=['cosine', 'step'], default='cosine',
                         help='Type of learning rate scheduler')
-    parser.add_argument('--warmup_epochs', type=int, default=10, help='Warmup epochs')
-    parser.add_argument('--scheduler_patience', type=int, default=10, help='Scheduler patience for plateau')
-    
+    parser.add_argument('--warmup_epochs', type=int,
+                        default=10, help='Warmup epochs')
+    parser.add_argument('--scheduler_patience', type=int,
+                        default=10, help='Scheduler patience for plateau')
+
     # Model arguments
     parser.add_argument('--resume', type=str, help='Resume from checkpoint')
-    parser.add_argument('--save_dir', type=str, default='./checkpoints', help='Checkpoint save directory')
-    parser.add_argument('--save_frequency', type=int, default=10, help='Save checkpoint every N epochs')
-    
+    parser.add_argument('--save_dir', type=str,
+                        default='./checkpoints', help='Checkpoint save directory')
+    parser.add_argument('--save_frequency', type=int,
+                        default=10, help='Save checkpoint every N epochs')
+
     # Advanced training options
-    parser.add_argument('--gradient_clip', type=float, default=1.0, help='Gradient clipping value')
-    parser.add_argument('--early_stopping', type=int, default=20, help='Early stopping patience (0=disabled)')
-    parser.add_argument('--print_frequency', type=int, default=10, help='Print frequency during training')
+    parser.add_argument('--gradient_clip', type=float,
+                        default=1.0, help='Gradient clipping value')
+    parser.add_argument('--early_stopping', type=int, default=20,
+                        help='Early stopping patience (0=disabled)')
+    parser.add_argument('--print_frequency', type=int,
+                        default=10, help='Print frequency during training')
 
     args = parser.parse_args()
 
@@ -373,13 +460,12 @@ def main():
     # Device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
-    
+
     # Print configuration
     print("\n" + "="*60)
     print("HTR 3-Stage Model Training Configuration")
     print("="*60)
     print(f"Data directory: {args.data_dir}")
-    print(f"Validation directory: {args.val_data_dir}")
     print(f"Save directory: {args.save_dir}")
     print(f"Epochs: {args.epochs}")
     print(f"Batch size: {args.batch_size}")
@@ -389,14 +475,16 @@ def main():
     print(f"Betas: {tuple(args.betas)}")
     print(f"Data augmentation: {'Enabled' if args.augment else 'Disabled'}")
     if args.use_sam:
-        print(f"SAM optimizer: Enabled (rho={args.sam_rho}, adaptive={args.sam_adaptive})")
+        print(
+            f"SAM optimizer: Enabled (rho={args.sam_rho}, adaptive={args.sam_adaptive})")
     if args.use_scheduler:
-        print(f"Scheduler: {args.scheduler_type} (warmup_epochs={args.warmup_epochs})")
+        print(
+            f"Scheduler: {args.scheduler_type} (warmup_epochs={args.warmup_epochs})")
     print(f"Gradient clipping: {args.gradient_clip}")
     print("="*60)
 
-    # Create vocabulary
-    vocab = create_vocab()
+    # Create vocabulary (load from pickle file if available)
+    vocab = create_vocab(data_dir=args.data_dir)
     print(f"Vocabulary size: {len(vocab)}")
 
     # Save vocabulary
@@ -416,8 +504,9 @@ def main():
     model.to(device)
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
-    # Create datasets
-    train_dataset = HTRDataset(args.data_dir, vocab, augment=args.augment)
+    # Create datasets with proper split specification
+    train_dataset = HTRDataset(
+        args.data_dir, vocab, split='train', augment=args.augment)
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
@@ -426,17 +515,16 @@ def main():
         num_workers=4
     )
 
-    val_loader = None
-    if args.val_data_dir:
-        # Validation dataset should not use augmentation
-        val_dataset = HTRDataset(args.val_data_dir, vocab, augment=False)
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=args.batch_size,
-            shuffle=False,
-            collate_fn=collate_fn,
-            num_workers=4
-        )
+    # Create validation dataset from the same data directory
+    val_dataset = HTRDataset(
+        args.data_dir, vocab, split='valid', augment=False)
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        collate_fn=collate_fn,
+        num_workers=4
+    )
 
     # Base optimizer classes
     base_optimizers = {
@@ -448,7 +536,7 @@ def main():
     # Create optimizer with improved configuration
     if args.use_sam:
         print(f"Using SAM optimizer with {args.base_optimizer.upper()} base")
-        
+
         if args.base_optimizer in ['adamw', 'adam']:
             optimizer = SAM(
                 model.parameters(),
@@ -472,23 +560,23 @@ def main():
     else:
         if args.base_optimizer == 'adamw':
             optimizer = optim.AdamW(
-                model.parameters(), 
-                lr=args.lr, 
+                model.parameters(),
+                lr=args.lr,
                 betas=tuple(args.betas),
                 weight_decay=args.weight_decay
             )
         elif args.base_optimizer == 'adam':
             optimizer = optim.Adam(
-                model.parameters(), 
-                lr=args.lr, 
+                model.parameters(),
+                lr=args.lr,
                 betas=tuple(args.betas),
                 weight_decay=args.weight_decay
             )
         elif args.base_optimizer == 'sgd':
             optimizer = optim.SGD(
-                model.parameters(), 
-                lr=args.lr, 
-                weight_decay=args.weight_decay, 
+                model.parameters(),
+                lr=args.lr,
+                weight_decay=args.weight_decay,
                 momentum=0.9
             )
 
@@ -527,8 +615,7 @@ def main():
 
     print(f"\nStarting training for {args.epochs} epochs...")
     print(f"Training samples: {len(train_dataset)}")
-    if val_loader:
-        print(f"Validation samples: {len(val_dataset)}")
+    print(f"Validation samples: {len(val_dataset)}")
 
     for epoch in range(start_epoch, args.epochs):
         print(f"\nEpoch {epoch + 1}/{args.epochs}")
@@ -536,7 +623,7 @@ def main():
 
         # Train
         train_loss = train_epoch(
-            model, train_loader, optimizer, device, vocab, 
+            model, train_loader, optimizer, device, vocab,
             use_sam=args.use_sam, gradient_clip=args.gradient_clip,
             print_frequency=args.print_frequency
         )
@@ -544,13 +631,9 @@ def main():
         print(f"Train Loss: {train_loss:.4f}")
 
         # Validate
-        if val_loader:
-            val_loss, char_acc = validate(model, val_loader, device, vocab)
-            val_losses.append(val_loss)
-            print(f"Val Loss: {val_loss:.4f}, Char Accuracy: {char_acc:.4f}")
-        else:
-            val_loss = train_loss
-            val_losses.append(val_loss)
+        val_loss, char_acc = validate(model, val_loader, device, vocab)
+        val_losses.append(val_loss)
+        print(f"Val Loss: {val_loss:.4f}, Char Accuracy: {char_acc:.4f}")
 
         # Learning rate scheduling
         if scheduler:
@@ -558,8 +641,9 @@ def main():
                 scheduler.step(val_loss)
             else:
                 scheduler.step()
-            
-            current_lr = scheduler.get_last_lr()[0] if hasattr(scheduler, 'get_last_lr') else args.lr
+
+            current_lr = scheduler.get_last_lr()[0] if hasattr(
+                scheduler, 'get_last_lr') else args.lr
             print(f"Learning rate: {current_lr:.6f}")
 
         # Save checkpoint periodically
@@ -584,7 +668,7 @@ def main():
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             patience_counter = 0
-            
+
             best_checkpoint = {
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
@@ -597,7 +681,7 @@ def main():
                 'vocab': vocab,
                 'args': vars(args)
             }
-            
+
             torch.save(best_checkpoint, os.path.join(
                 args.save_dir, 'best_model.pth'))
             print(f"🎯 New best model saved! Val loss: {val_loss:.4f}")
@@ -606,7 +690,8 @@ def main():
 
         # Early stopping
         if args.early_stopping > 0 and patience_counter >= args.early_stopping:
-            print(f"\n⏹️  Early stopping triggered after {patience_counter} epochs without improvement")
+            print(
+                f"\n⏹️  Early stopping triggered after {patience_counter} epochs without improvement")
             break
 
     print(f"\n✅ Training completed!")
