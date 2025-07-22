@@ -564,10 +564,10 @@ class HTRModel(nn.Module):
                 all_lengths, device=images.device, dtype=torch.long)
 
             # Validate that input sequences are long enough for targets
-            for i in range(batch_size):
-                if input_lengths[i] < target_lengths[i]:
-                    print(
-                        f"Warning: Input length {input_lengths[i]} < target length {target_lengths[i]} for sample {i}")
+            # for i in range(batch_size):
+            #     if input_lengths[i] < target_lengths[i]:
+            #         print(
+            #             f"Warning: Input length {input_lengths[i]} < target length {target_lengths[i]} for sample {i}")
             # FIXED: Apply log_softmax before CTC loss (CTC expects log probabilities)
             log_probs = F.log_softmax(padded_logits, dim=-1)
 

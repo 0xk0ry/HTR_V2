@@ -342,9 +342,9 @@ def train_epoch(model, dataloader, optimizer, device, vocab, use_sam=False, grad
         total_loss += loss.item()
         num_batches += 1
 
-        if batch_idx % print_frequency == 0:
-            print(
-                f'Batch {batch_idx}/{len(dataloader)}, Loss: {loss.item():.4f}')
+        # if batch_idx % print_frequency == 0:
+        #     print(
+        #         f'Batch {batch_idx}/{len(dataloader)}, Loss: {loss.item():.4f}')
 
     return total_loss / num_batches
 
