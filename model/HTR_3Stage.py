@@ -558,8 +558,8 @@ class HTRModel(nn.Module):
         # Transpose for CTC: [T_max, B, vocab_size] as required by CTC
         padded_logits = padded_logits.transpose(0, 1).contiguous()
 
-        if self.training and targets is not None and target_lengths is not None:
-            # FIXED: Proper input length validation and CTC loss computation
+        if targets is not None and target_lengths is not None:
+            # FIXED: Compute loss during both training and validation when targets are provided
             input_lengths = torch.tensor(
                 all_lengths, device=images.device, dtype=torch.long)
 
