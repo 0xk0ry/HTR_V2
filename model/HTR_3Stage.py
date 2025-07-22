@@ -8,7 +8,6 @@ import numpy as np
 from typing import List, Tuple, Optional, Dict
 from PIL import Image
 import cv2
-import kenlm
 from pyctcdecode import build_ctcdecoder
 
 
