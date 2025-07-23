@@ -39,13 +39,13 @@ DEFAULT_NORMALIZATION = {
     'std': [0.5]
 }
 DEFAULT_CVT_3STAGE_CONFIG = {
-    'embed_dims':   [64, 128, 128],   # keep Stage 3 at 128 so heads have room
-    'num_heads':    [1,   2,   4],     # restore 4 heads in Stage 3 for richer context
-    'depths':       [1,   2,   6],     # full 6 blocks in Stage 3 to span long dependencies
-    'patch_sizes':  [3,   3,   3],     
-    'strides':      [2,   2,   1],     # halve twice, then preserve width for CTC
-    'kernel_sizes': [3,   3,   3],
-    'mlp_ratios':   [3,   3,   3],     # a bit leaner FFN but still expressive
+    'embed_dims': [64, 96, 128],
+    'num_heads': [1, 2, 4],
+    'depths': [1, 2, 4],
+    'patch_sizes': [3, 3, 3],
+    'strides': [2, 2, 1],
+    'kernel_sizes': [3, 3, 3],
+    'mlp_ratios': [2, 2, 2]
 }
 
 # CvT (Convolutional Vision Transformer) Implementation
@@ -191,14 +191,14 @@ class CvT3Stage(nn.Module):
         self.num_classes = num_classes
         self.use_checkpoint = use_checkpoint
 
-        # Updated configuration back to original
-        embed_dims = [64, 128, 128]  # keep Stage 3 at 128 so heads have room
-        num_heads = [1, 2, 4]        # restore 4 heads in Stage 3 for richer context
-        depths = [1, 2, 6]           # full 6 blocks in Stage 3 to span long dependencies
+        # Updated configuration to new specification
+        embed_dims = [64, 96, 128]   # 64→96→128 channels
+        num_heads = [1, 2, 4]        # 1→2→4 heads
+        depths = [1, 2, 4]           # 1→2→4 blocks (reduced from 6 to 4 in Stage 3)
         patch_sizes = [3, 3, 3]
         strides = [2, 2, 1]          # halve twice, then preserve width for CTC
         kernel_sizes = [3, 3, 3]
-        mlp_ratios = [3, 3, 3]       # a bit leaner FFN but still expressive
+        mlp_ratios = [2, 2, 2]       # consistent 2x MLP ratios across all stages
 
         # Stage 1: 3×3 conv, 64 channels, stride=2, 1 block (64×512 → 32×256)
         self.stage1_embed = PatchEmbed(
@@ -223,7 +223,7 @@ class CvT3Stage(nn.Module):
                 use_checkpoint=use_checkpoint and i >= depths[0]//2  # Only checkpoint later blocks
             ))
 
-        # Stage 2: 3×3 conv, 128 channels, stride=2, 2 blocks (32×256 → 16×128)
+        # Stage 2: 3×3 conv, 96 channels, stride=2, 2 blocks (32×256 → 16×128)
         self.stage2_embed = PatchEmbed(
             img_size=None,  # Will be determined dynamically
             patch_size=patch_sizes[1],
