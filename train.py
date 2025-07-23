@@ -5,7 +5,7 @@ Training script for HTR model with CvT backbone
 from utils.sam import SAM
 import numpy as np
 from PIL import Image
-from model.HTR_3Stage import HTRModel, DEFAULT_VOCAB
+from model.HTR_3Stage_new import HTRModel, DEFAULT_VOCAB
 import torch.nn.functional as F
 import torch
 import torch.optim as optim

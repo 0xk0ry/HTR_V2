@@ -287,65 +287,106 @@ def ctc_decode_greedy(logits, vocab):
 
 
 def train_epoch(model, dataloader, optimizer, device, vocab, use_sam=False, gradient_clip=1.0, print_frequency=10):
-    """Train for one epoch"""
+    """Train for one epoch with memory optimization"""
     model.train()
     total_loss = 0
     num_batches = 0
+    
+    # Enable gradient checkpointing for memory efficiency
+    if hasattr(model, 'cvt'):
+        model.cvt.use_checkpoint = True
 
     for batch_idx, (images, targets, target_lengths) in enumerate(dataloader):
-        images = images.to(device)
-        targets = targets.to(device)
-        target_lengths = target_lengths.to(device)
+        images = images.to(device, non_blocking=True)
+        targets = targets.to(device, non_blocking=True)
+        target_lengths = target_lengths.to(device, non_blocking=True)
 
-        # Flatten targets for CTC loss
-        targets_flat = []
-        for i, length in enumerate(target_lengths):
-            targets_flat.extend(targets[i][:length].tolist())
-        targets_flat = torch.tensor(targets_flat, device=device)
-
-        if use_sam:
-            # First forward-backward pass
-            def closure():
+        # Process smaller sub-batches if batch is too large
+        batch_size = images.size(0)
+        if batch_size > 4:  # Split large batches to reduce memory
+            sub_batch_size = 2
+            total_loss_batch = 0
+            
+            for i in range(0, batch_size, sub_batch_size):
+                end_idx = min(i + sub_batch_size, batch_size)
+                sub_images = images[i:end_idx]
+                sub_targets = targets[i:end_idx]
+                sub_target_lengths = target_lengths[i:end_idx]
+                
+                # Flatten targets for this sub-batch
+                targets_flat = []
+                for j in range(len(sub_target_lengths)):
+                    targets_flat.extend(sub_targets[j][:sub_target_lengths[j]].tolist())
+                targets_flat = torch.tensor(targets_flat, device=device)
+                
                 optimizer.zero_grad()
-                logits, loss = model(images, targets_flat, target_lengths)
-                loss.backward()
-                # Gradient clipping
-                if gradient_clip > 0:
-                    torch.nn.utils.clip_grad_norm_(
-                        model.parameters(), gradient_clip)
-                return loss
-
-            loss = optimizer.step(closure)
-
-            # Second forward-backward pass
-            logits, loss = model(images, targets_flat, target_lengths)
-            optimizer.zero_grad()
-            loss.backward()
-
-            # Gradient clipping
+                
+                # Use mixed precision for memory efficiency
+                with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+                    logits, loss = model(sub_images, targets_flat, sub_target_lengths)
+                
+                # Scale loss by sub-batch ratio
+                scaled_loss = loss * (end_idx - i) / batch_size
+                scaled_loss.backward()
+                
+                total_loss_batch += scaled_loss.item()
+                
+                # Clear cache between sub-batches
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            
+            # Update with accumulated gradients
             if gradient_clip > 0:
-                torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), gradient_clip)
-
+                torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
             optimizer.step()
+            
+            total_loss += total_loss_batch
         else:
-            optimizer.zero_grad()
-            logits, loss = model(images, targets_flat, target_lengths)
-            loss.backward()
+            # Process normal batch
+            targets_flat = []
+            for i, length in enumerate(target_lengths):
+                targets_flat.extend(targets[i][:length].tolist())
+            targets_flat = torch.tensor(targets_flat, device=device)
 
-            # Gradient clipping
-            if gradient_clip > 0:
-                torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), gradient_clip)
+            if use_sam:
+                # First forward-backward pass
+                def closure():
+                    optimizer.zero_grad()
+                    with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+                        logits, loss = model(images, targets_flat, target_lengths)
+                    loss.backward()
+                    if gradient_clip > 0:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
+                    return loss
 
-            optimizer.step()
+                loss = optimizer.step(closure)
 
-        total_loss += loss.item()
+                # Second forward-backward pass
+                with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+                    logits, loss = model(images, targets_flat, target_lengths)
+                optimizer.zero_grad()
+                loss.backward()
+
+                if gradient_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
+                optimizer.step()
+            else:
+                optimizer.zero_grad()
+                with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+                    logits, loss = model(images, targets_flat, target_lengths)
+                loss.backward()
+
+                if gradient_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
+                optimizer.step()
+
+            total_loss += loss.item()
+
         num_batches += 1
-
-        # if batch_idx % print_frequency == 0:
-        #     print(
-        #         f'Batch {batch_idx}/{len(dataloader)}, Loss: {loss.item():.4f}')
+        
+        # Clear cache periodically
+        if batch_idx % 10 == 0 and torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     return total_loss / num_batches
 
@@ -399,6 +440,12 @@ def validate(model, dataloader, device, vocab):
     return avg_loss, char_accuracy
 
 
+def get_memory_usage():
+    """Get current GPU memory usage in MB"""
+    if torch.cuda.is_available():
+        return torch.cuda.memory_allocated() / 1024**2
+    return 0
+
 def main():
     parser = argparse.ArgumentParser(description='Train HTR 3-Stage Model')
 
@@ -411,7 +458,7 @@ def main():
     # Training arguments
     parser.add_argument('--epochs', type=int, default=100,
                         help='Number of epochs')
-    parser.add_argument('--batch_size', type=int, default=8, help='Batch size')
+    parser.add_argument('--batch_size', type=int, default=2, help='Batch size (reduced for memory)')  # Reduced default
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--weight_decay', type=float,
                         default=0.01, help='Weight decay')

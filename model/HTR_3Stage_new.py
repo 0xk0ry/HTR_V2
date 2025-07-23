@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as transforms
 from torch.nn import CTCLoss
+from torch.utils.checkpoint import checkpoint
 import math
 import numpy as np
 from typing import List, Tuple, Optional, Dict
@@ -13,19 +14,38 @@ from pyctcdecode import build_ctcdecoder
 
 # Constants
 DEFAULT_VOCAB = ['<blank>'] + \
-    list('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,!?;: ')
+    list(
+        'abcdefghijklmnopqrstuvwxyz'
+        'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+        '0123456789'
+        '.,!?;: '
+        'àáảãạăằắẳẵặâầấẩẫậ'
+        'èéẻẽẹêềếểễệ'
+        'ìíỉĩị'
+        'òóỏõọôồốổỗộơờớởỡợ'
+        'ùúủũụưừứửữự'
+        'ỳýỷỹỵ'
+        'đ'
+        'ÀÁẢÃẠĂẰẮẲẴẶÂẦẤẨẪẬ'
+        'ÈÉẺẼẸÊỀẾỂỄỆ'
+        'ÌÍỈĨỊ'
+        'ÒÓỎÕỌÔỒỐỔỖỘƠỜỚỞỠỢ'
+        'ÙÚỦŨỤƯỪỨỬỮỰ'
+        'ỲÝỶỸỴ'
+        'Đ'
+    )
 DEFAULT_NORMALIZATION = {
     'mean': [0.5],  # Greyscale normalization
     'std': [0.5]
 }
 DEFAULT_CVT_3STAGE_CONFIG = {
-    'embed_dims': [64, 128, 256],  # Channel dimensions
-    'num_heads': [1, 2, 4],
-    'depths': [1, 2, 6],
+    'embed_dims': [64, 128, 256],  # Original config: 64→128→256
+    'num_heads': [1, 2, 4],        # Original config: 1→2→4
+    'depths': [1, 2, 6],           # Original config: 1→2→6
     'patch_sizes': [3, 3, 3],
-    'strides': [2, 2, 1],  # Updated: Stage 1 stride=2, Stage 3 stride=1
+    'strides': [2, 2, 1],          # Keep same: Stage 1 stride=2, Stage 3 stride=1
     'kernel_sizes': [3, 3, 3],
-    'mlp_ratios': [4, 4, 4]
+    'mlp_ratios': [3, 3, 3]        # Keep reduced MLP ratio for memory efficiency
 }
 
 # CvT (Convolutional Vision Transformer) Implementation
@@ -111,9 +131,9 @@ class ConvolutionalAttention(nn.Module):
 
 
 class CvTBlock(nn.Module):
-    """CvT Transformer Block"""
+    """CvT Transformer Block with gradient checkpointing support"""
 
-    def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, drop=0., attn_drop=0., kernel_size=3):
+    def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, drop=0., attn_drop=0., kernel_size=3, use_checkpoint=False):
         super().__init__()
         self.norm1 = nn.LayerNorm(dim)
         self.attn = ConvolutionalAttention(dim, num_heads=num_heads, qkv_bias=qkv_bias,
@@ -127,10 +147,21 @@ class CvTBlock(nn.Module):
             nn.Linear(mlp_hidden_dim, dim),
             nn.Dropout(drop)
         )
+        self.use_checkpoint = use_checkpoint
 
     def forward(self, x, H, W):
-        x = x + self.attn(self.norm1(x), H, W)
-        x = x + self.mlp(self.norm2(x))
+        if self.use_checkpoint and self.training:
+            # Use gradient checkpointing to save memory during training
+            def create_custom_forward(module):
+                def custom_forward(*inputs):
+                    return module(*inputs)
+                return custom_forward
+            
+            x = x + checkpoint(create_custom_forward(lambda x: self.attn(self.norm1(x), H, W)), x)
+            x = x + checkpoint(create_custom_forward(lambda x: self.mlp(self.norm2(x))), x)
+        else:
+            x = x + self.attn(self.norm1(x), H, W)
+            x = x + self.mlp(self.norm2(x))
         return x
 
 
@@ -153,20 +184,21 @@ class CvTStage(nn.Module):
 
 
 class CvT3Stage(nn.Module):
-    """3-Stage Convolutional Vision Transformer for HTR"""
+    """3-Stage Convolutional Vision Transformer for HTR with memory optimizations"""
 
-    def __init__(self, img_size=512, in_chans=1, num_classes=1000):
+    def __init__(self, img_size=512, in_chans=1, num_classes=1000, use_checkpoint=False):
         super().__init__()
         self.num_classes = num_classes
+        self.use_checkpoint = use_checkpoint
 
-        # Configuration from specifications (updated for new settings)
-        embed_dims = [64, 128, 256]
-        num_heads = [1, 2, 4]
-        depths = [1, 2, 6]
+        # Configuration from specifications (reverted to original)
+        embed_dims = [64, 128, 256]  # Original config: 64→128→256
+        num_heads = [1, 2, 4]        # Original config: 1→2→4
+        depths = [1, 2, 6]           # Original config: 1→2→6
         patch_sizes = [3, 3, 3]
-        strides = [2, 2, 1]  # Updated: Stage 1 stride=2, Stage 3 stride=1
+        strides = [2, 2, 1]          # 2→2→1 for spatial reduction
         kernel_sizes = [3, 3, 3]
-        mlp_ratios = [4, 4, 4]
+        mlp_ratios = [3, 3, 3]       # Keep reduced from 4 to 3 for memory efficiency
 
         # Stage 1: 3×3 conv, 64 channels, stride=2, 1 block (64×512 → 32×256)
         self.stage1_embed = PatchEmbed(
@@ -187,7 +219,8 @@ class CvT3Stage(nn.Module):
                 qkv_bias=True,
                 drop=0.1,
                 attn_drop=0.1,
-                kernel_size=kernel_sizes[0]
+                kernel_size=kernel_sizes[0],
+                use_checkpoint=use_checkpoint and i >= depths[0]//2  # Only checkpoint later blocks
             ))
 
         # Stage 2: 3×3 conv, 128 channels, stride=2, 2 blocks (32×256 → 16×128)
@@ -209,7 +242,8 @@ class CvT3Stage(nn.Module):
                 qkv_bias=True,
                 drop=0.1,
                 attn_drop=0.1,
-                kernel_size=kernel_sizes[1]
+                kernel_size=kernel_sizes[1],
+                use_checkpoint=use_checkpoint and i >= depths[1]//2  # Only checkpoint later blocks
             ))
 
         # Stage 3: 3×3 conv, 256 channels, stride=1, 6 blocks (16×128 → 16×128)
@@ -231,7 +265,8 @@ class CvT3Stage(nn.Module):
                 qkv_bias=True,
                 drop=0.1,
                 attn_drop=0.1,
-                kernel_size=kernel_sizes[2]
+                kernel_size=kernel_sizes[2],
+                use_checkpoint=use_checkpoint and i >= depths[2]//2  # Only checkpoint later blocks
             ))
 
         self.norm = nn.LayerNorm(embed_dims[2])
@@ -464,16 +499,17 @@ class HTRModel(nn.Module):
         self.cvt = CvT3Stage(
             img_size=chunk_width,
             in_chans=1,  # Greyscale input
-            num_classes=vocab_size
+            num_classes=vocab_size,
+            use_checkpoint=True  # Enable gradient checkpointing for memory efficiency
         )
 
-        # MLP head for character prediction
-        self.feature_dim = 256  # Final stage embedding dimension
+        # MLP head for character prediction (reverted to 256-dim features)
+        self.feature_dim = 256  # Reverted: Final stage embedding dimension
         self.classifier = nn.Sequential(
-            nn.Linear(self.feature_dim, self.feature_dim // 2),
+            nn.Linear(self.feature_dim, 128),  # Hidden layer for memory efficiency
             nn.GELU(),
             nn.Dropout(0.1),
-            nn.Linear(self.feature_dim // 2, vocab_size)
+            nn.Linear(128, vocab_size)
         )
 
         # CTC Loss
