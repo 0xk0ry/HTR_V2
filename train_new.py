@@ -303,7 +303,7 @@ def train_epoch(model, dataloader, optimizer, device, vocab, use_sam=False, grad
 
         # Process smaller sub-batches if batch is too large
         batch_size = images.size(0)
-        if batch_size > 4:  # Split large batches to reduce memory
+        if batch_size > 64:  # Split large batches to reduce memory
             sub_batch_size = 2
             total_loss_batch = 0
             
