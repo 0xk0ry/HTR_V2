@@ -39,13 +39,13 @@ DEFAULT_NORMALIZATION = {
     'std': [0.5]
 }
 DEFAULT_CVT_3STAGE_CONFIG = {
-    'embed_dims': [64, 128, 256],  # Original config: 64→128→256
-    'num_heads': [1, 2, 4],        # Original config: 1→2→4
-    'depths': [1, 2, 6],           # Original config: 1→2→6
+    'embed_dims': [64, 128, 128],  # keep Stage 3 at 128 so heads have room
+    'num_heads': [1, 2, 4],        # restore 4 heads in Stage 3 for richer context
+    'depths': [1, 2, 6],           # full 6 blocks in Stage 3 to span long dependencies
     'patch_sizes': [3, 3, 3],
-    'strides': [2, 2, 1],          # Keep same: Stage 1 stride=2, Stage 3 stride=1
+    'strides': [2, 2, 1],          # halve twice, then preserve width for CTC
     'kernel_sizes': [3, 3, 3],
-    'mlp_ratios': [3, 3, 3]        # Keep reduced MLP ratio for memory efficiency
+    'mlp_ratios': [3, 3, 3]        # a bit leaner FFN but still expressive
 }
 
 # CvT (Convolutional Vision Transformer) Implementation
@@ -191,14 +191,14 @@ class CvT3Stage(nn.Module):
         self.num_classes = num_classes
         self.use_checkpoint = use_checkpoint
 
-        # Configuration from specifications (reverted to original)
-        embed_dims = [64, 128, 256]  # Original config: 64→128→256
-        num_heads = [1, 2, 4]        # Original config: 1→2→4
-        depths = [1, 2, 6]           # Original config: 1→2→6
+        # Updated configuration to your specification
+        embed_dims = [64, 128, 128]  # keep Stage 3 at 128 so heads have room
+        num_heads = [1, 2, 4]        # restore 4 heads in Stage 3 for richer context
+        depths = [1, 2, 6]           # full 6 blocks in Stage 3 to span long dependencies
         patch_sizes = [3, 3, 3]
-        strides = [2, 2, 1]          # 2→2→1 for spatial reduction
+        strides = [2, 2, 1]          # halve twice, then preserve width for CTC
         kernel_sizes = [3, 3, 3]
-        mlp_ratios = [3, 3, 3]       # Keep reduced from 4 to 3 for memory efficiency
+        mlp_ratios = [3, 3, 3]       # a bit leaner FFN but still expressive
 
         # Stage 1: 3×3 conv, 64 channels, stride=2, 1 block (64×512 → 32×256)
         self.stage1_embed = PatchEmbed(
@@ -503,8 +503,8 @@ class HTRModel(nn.Module):
             use_checkpoint=True  # Enable gradient checkpointing for memory efficiency
         )
 
-        # MLP head for character prediction (reverted to 256-dim features)
-        self.feature_dim = 256  # Reverted: Final stage embedding dimension
+        # MLP head for character prediction (updated to 128-dim features)
+        self.feature_dim = 128  # Updated: Stage 3 now outputs 128 channels (hybrid config)
         self.classifier = nn.Sequential(
             nn.Linear(self.feature_dim, 128),  # Hidden layer for memory efficiency
             nn.GELU(),
