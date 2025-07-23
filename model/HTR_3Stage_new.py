@@ -39,13 +39,18 @@ DEFAULT_NORMALIZATION = {
     'std': [0.5]
 }
 DEFAULT_CVT_3STAGE_CONFIG = {
-    'embed_dims': [64, 128, 128],  # keep Stage 3 at 128 so heads have room
-    'num_heads': [1, 2, 4],        # restore 4 heads in Stage 3 for richer context
-    'depths': [1, 2, 6],           # full 6 blocks in Stage 3 to span long dependencies
-    'patch_sizes': [3, 3, 3],
-    'strides': [2, 2, 1],          # halve twice, then preserve width for CTC
-    'kernel_sizes': [3, 3, 3],
-    'mlp_ratios': [3, 3, 3]        # a bit leaner FFN but still expressive
+    #  Embed dims: keep Stage-3 at 128 so heads have enough subspace
+    'embed_dims':   [64, 128, 128],
+    #  Attention heads: 1→2→4 gives you 32-dim per head in Stage 3
+    'num_heads':    [1,   2,   4],
+    #  Depths: leave Stage 3 deep enough to span long lines
+    'depths':       [1,   2,   6],
+    #  Downsampling: halve twice then preserve width for 128 tokens
+    'patch_sizes':  [3,   3,   3],
+    'strides':      [2,   2,   1],
+    'kernel_sizes': [3,   3,   3],
+    #  FFN ratios: slim early FFNs to save memory, but fuller in Stage 3
+    'mlp_ratios':   [2,   2,   4],
 }
 
 # CvT (Convolutional Vision Transformer) Implementation
@@ -191,14 +196,14 @@ class CvT3Stage(nn.Module):
         self.num_classes = num_classes
         self.use_checkpoint = use_checkpoint
 
-        # Updated configuration to your specification
-        embed_dims = [64, 128, 128]  # keep Stage 3 at 128 so heads have room
-        num_heads = [1, 2, 4]        # restore 4 heads in Stage 3 for richer context
-        depths = [1, 2, 6]           # full 6 blocks in Stage 3 to span long dependencies
+        # Updated configuration with new MLP ratios
+        embed_dims = [64, 128, 128]  # keep Stage 3 at 128 so heads have enough subspace
+        num_heads = [1, 2, 4]        # 1→2→4 gives you 32-dim per head in Stage 3
+        depths = [1, 2, 6]           # leave Stage 3 deep enough to span long lines
         patch_sizes = [3, 3, 3]
-        strides = [2, 2, 1]          # halve twice, then preserve width for CTC
+        strides = [2, 2, 1]          # halve twice then preserve width for 128 tokens
         kernel_sizes = [3, 3, 3]
-        mlp_ratios = [3, 3, 3]       # a bit leaner FFN but still expressive
+        mlp_ratios = [2, 2, 4]       # slim early FFNs to save memory, fuller in Stage 3
 
         # Stage 1: 3×3 conv, 64 channels, stride=2, 1 block (64×512 → 32×256)
         self.stage1_embed = PatchEmbed(
