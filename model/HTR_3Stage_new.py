@@ -19,11 +19,11 @@ DEFAULT_NORMALIZATION = {
     'std': [0.5]
 }
 DEFAULT_CVT_3STAGE_CONFIG = {
-    'embed_dims': [64, 128, 256],  # Updated to match your table
+    'embed_dims': [64, 128, 256],  # Channel dimensions
     'num_heads': [1, 2, 4],
     'depths': [1, 2, 6],
     'patch_sizes': [3, 3, 3],
-    'strides': [1, 2, 2],
+    'strides': [2, 2, 1],  # Updated: Stage 1 stride=2, Stage 3 stride=1
     'kernel_sizes': [3, 3, 3],
     'mlp_ratios': [4, 4, 4]
 }
@@ -164,11 +164,11 @@ class CvT3Stage(nn.Module):
         num_heads = [1, 2, 4]
         depths = [1, 2, 6]
         patch_sizes = [3, 3, 3]
-        strides = [1, 2, 2]
+        strides = [2, 2, 1]  # Updated: Stage 1 stride=2, Stage 3 stride=1
         kernel_sizes = [3, 3, 3]
         mlp_ratios = [4, 4, 4]
 
-        # Stage 1: 3×3 conv, 64 channels, stride=1, 1 block
+        # Stage 1: 3×3 conv, 64 channels, stride=2, 1 block (64×512 → 32×256)
         self.stage1_embed = PatchEmbed(
             img_size=img_size,
             patch_size=patch_sizes[0],
@@ -190,7 +190,7 @@ class CvT3Stage(nn.Module):
                 kernel_size=kernel_sizes[0]
             ))
 
-        # Stage 2: 3×3 conv, 128 channels, stride=2, 2 blocks
+        # Stage 2: 3×3 conv, 128 channels, stride=2, 2 blocks (32×256 → 16×128)
         self.stage2_embed = PatchEmbed(
             img_size=None,  # Will be determined dynamically
             patch_size=patch_sizes[1],
@@ -212,7 +212,7 @@ class CvT3Stage(nn.Module):
                 kernel_size=kernel_sizes[1]
             ))
 
-        # Stage 3: 3×3 conv, 256 channels, stride=2, 6 blocks
+        # Stage 3: 3×3 conv, 256 channels, stride=1, 6 blocks (16×128 → 16×128)
         self.stage3_embed = PatchEmbed(
             img_size=None,  # Will be determined dynamically
             patch_size=patch_sizes[2],
