@@ -246,7 +246,7 @@ class CvT3Stage(nn.Module):
                 use_checkpoint=use_checkpoint and i >= depths[1]//2  # Only checkpoint later blocks
             ))
 
-        # Stage 3: 3×3 conv, 256 channels, stride=1, 6 blocks (16×128 → 16×128)
+        # Stage 3: 3×3 conv, 128 channels, stride=1, 4 blocks (16×128 → 16×128)
         self.stage3_embed = PatchEmbed(
             img_size=None,  # Will be determined dynamically
             patch_size=patch_sizes[2],
@@ -276,23 +276,26 @@ class CvT3Stage(nn.Module):
 
     def forward(self, x):
         """Forward pass through all 3 stages"""
+        # Use the actual embed_dims from configuration
+        embed_dims = [64, 96, 128]
+        
         # Stage 1: [B, 1, 64, 512] -> [B, H1*W1, 64]
         x, (H1, W1) = self.stage1_embed(x)
         for block in self.stage1_blocks:
             x = block(x, H1, W1)
 
         # Reshape back to 2D for next stage
-        x = x.transpose(1, 2).reshape(-1, 64, H1, W1)
+        x = x.transpose(1, 2).reshape(-1, embed_dims[0], H1, W1)
 
-        # Stage 2: [B, 64, H1, W1] -> [B, H2*W2, 128]
+        # Stage 2: [B, 64, H1, W1] -> [B, H2*W2, 96]
         x, (H2, W2) = self.stage2_embed(x)
         for block in self.stage2_blocks:
             x = block(x, H2, W2)
 
         # Reshape back to 2D for next stage
-        x = x.transpose(1, 2).reshape(-1, 128, H2, W2)
+        x = x.transpose(1, 2).reshape(-1, embed_dims[1], H2, W2)
 
-        # Stage 3: [B, 128, H2, W2] -> [B, H3*W3, 256]
+        # Stage 3: [B, 96, H2, W2] -> [B, H3*W3, 128]
         x, (H3, W3) = self.stage3_embed(x)
         for block in self.stage3_blocks:
             x = block(x, H3, W3)
@@ -304,23 +307,26 @@ class CvT3Stage(nn.Module):
 
     def forward_features(self, x):
         """Return features without classification head"""
+        # Use the actual embed_dims from configuration
+        embed_dims = [64, 96, 128]
+        
         # Stage 1: [B, 1, 64, 512] -> [B, H1*W1, 64]
         x, (H1, W1) = self.stage1_embed(x)
         for block in self.stage1_blocks:
             x = block(x, H1, W1)
 
         # Reshape back to 2D for next stage
-        x = x.transpose(1, 2).reshape(-1, 64, H1, W1)
+        x = x.transpose(1, 2).reshape(-1, embed_dims[0], H1, W1)
 
-        # Stage 2: [B, 64, H1, W1] -> [B, H2*W2, 128]
+        # Stage 2: [B, 64, H1, W1] -> [B, H2*W2, 96]
         x, (H2, W2) = self.stage2_embed(x)
         for block in self.stage2_blocks:
             x = block(x, H2, W2)
 
         # Reshape back to 2D for next stage
-        x = x.transpose(1, 2).reshape(-1, 128, H2, W2)
+        x = x.transpose(1, 2).reshape(-1, embed_dims[1], H2, W2)
 
-        # Stage 3: [B, 128, H2, W2] -> [B, H3*W3, 256]
+        # Stage 3: [B, 96, H2, W2] -> [B, H3*W3, 128]
         x, (H3, W3) = self.stage3_embed(x)
         for block in self.stage3_blocks:
             x = block(x, H3, W3)
