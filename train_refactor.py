@@ -285,16 +285,16 @@ def ctc_decode_greedy(logits, vocab):
     return decoded_texts
 
 
-def train_epoch(model, dataloader, optimizer, device, vocab, use_sam=False, gradient_clip=1.0, print_frequency=10):
+def train_epoch(model, dataloader, optimizer, device, vocab, use_sam=False, gradient_clip=1.0, print_frequency=10, use_amp=False, scaler=None):
     """Train for one epoch"""
     model.train()
     total_loss = 0
     num_batches = 0
 
     for batch_idx, (images, targets, target_lengths) in enumerate(dataloader):
-        images = images.to(device)
-        targets = targets.to(device)
-        target_lengths = target_lengths.to(device)
+        images = images.to(device, non_blocking=True)
+        targets = targets.to(device, non_blocking=True)
+        target_lengths = target_lengths.to(device, non_blocking=True)
 
         # Flatten targets for CTC loss
         targets_flat = []
@@ -303,41 +303,64 @@ def train_epoch(model, dataloader, optimizer, device, vocab, use_sam=False, grad
         targets_flat = torch.tensor(targets_flat, device=device)
 
         if use_sam:
-            # First forward-backward pass
+            # SAM with AMP support
             def closure():
                 optimizer.zero_grad()
-                logits, loss = model(images, targets_flat, target_lengths)
-                loss.backward()
-                # Gradient clipping
-                if gradient_clip > 0:
-                    torch.nn.utils.clip_grad_norm_(
-                        model.parameters(), gradient_clip)
+                
+                if use_amp and scaler is not None:
+                    with torch.cuda.autocast():
+                        logits, loss = model(images, targets_flat, target_lengths)
+                    scaler.scale(loss).backward()
+                    if gradient_clip > 0:
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
+                else:
+                    logits, loss = model(images, targets_flat, target_lengths)
+                    loss.backward()
+                    if gradient_clip > 0:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
+                
                 return loss
 
             loss = optimizer.step(closure)
 
             # Second forward-backward pass
-            logits, loss = model(images, targets_flat, target_lengths)
-            optimizer.zero_grad()
-            loss.backward()
-
-            # Gradient clipping
-            if gradient_clip > 0:
-                torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), gradient_clip)
-
-            optimizer.step()
+            if use_amp and scaler is not None:
+                with torch.cuda.autocast():
+                    logits, loss = model(images, targets_flat, target_lengths)
+                optimizer.zero_grad()
+                scaler.scale(loss).backward()
+                if gradient_clip > 0:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                logits, loss = model(images, targets_flat, target_lengths)
+                optimizer.zero_grad()
+                loss.backward()
+                if gradient_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
+                optimizer.step()
         else:
+            # Standard training with AMP support
             optimizer.zero_grad()
-            logits, loss = model(images, targets_flat, target_lengths)
-            loss.backward()
-
-            # Gradient clipping
-            if gradient_clip > 0:
-                torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), gradient_clip)
-
-            optimizer.step()
+            
+            if use_amp and scaler is not None:
+                with torch.cuda.autocast():
+                    logits, loss = model(images, targets_flat, target_lengths)
+                scaler.scale(loss).backward()
+                if gradient_clip > 0:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                logits, loss = model(images, targets_flat, target_lengths)
+                loss.backward()
+                if gradient_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
+                optimizer.step()
 
         total_loss += loss.item()
         num_batches += 1
@@ -349,7 +372,7 @@ def train_epoch(model, dataloader, optimizer, device, vocab, use_sam=False, grad
     return total_loss / num_batches
 
 
-def validate(model, dataloader, device, vocab):
+def validate(model, dataloader, device, vocab, use_amp=False):
     """Validate the model"""
     model.eval()
     total_loss = 0
@@ -359,9 +382,9 @@ def validate(model, dataloader, device, vocab):
 
     with torch.no_grad():
         for images, targets, target_lengths in dataloader:
-            images = images.to(device)
-            targets = targets.to(device)
-            target_lengths = target_lengths.to(device)
+            images = images.to(device, non_blocking=True)
+            targets = targets.to(device, non_blocking=True)
+            target_lengths = target_lengths.to(device, non_blocking=True)
 
             # Flatten targets for CTC loss
             targets_flat = []
@@ -369,7 +392,12 @@ def validate(model, dataloader, device, vocab):
                 targets_flat.extend(targets[i][:length].tolist())
             targets_flat = torch.tensor(targets_flat, device=device)
 
-            logits, loss = model(images, targets_flat, target_lengths)
+            if use_amp:
+                with torch.cuda.autocast():
+                    logits, loss = model(images, targets_flat, target_lengths)
+            else:
+                logits, loss = model(images, targets_flat, target_lengths)
+                
             total_loss += loss.item()
             num_batches += 1
 
@@ -451,6 +479,12 @@ def main():
                         help='Early stopping patience (0=disabled)')
     parser.add_argument('--print_frequency', type=int,
                         default=10, help='Print frequency during training')
+    
+    # GPU optimization options
+    parser.add_argument('--use_amp', action='store_true',
+                        help='Use Automatic Mixed Precision (AMP) for faster training')
+    parser.add_argument('--compile_model', action='store_true',
+                        help='Use torch.compile for faster training (PyTorch 2.0+)')
 
     args = parser.parse_args()
 
@@ -460,6 +494,29 @@ def main():
     # Device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
+    
+    # GPU optimizations
+    if torch.cuda.is_available():
+        # Enable cuDNN optimizations
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.deterministic = False
+        
+        # Enable TensorFloat-32 (TF32) if available (RTX 30xx+ series)
+        if hasattr(torch.backends.cuda.matmul, 'allow_tf32'):
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+        
+        print("✅ GPU optimizations enabled")
+    
+    # Setup AMP scaler if requested
+    scaler = None
+    if args.use_amp and torch.cuda.is_available():
+        if hasattr(torch, 'amp') and hasattr(torch.amp, 'GradScaler'):
+            scaler = torch.amp.GradScaler()
+            print("✅ Automatic Mixed Precision (AMP) enabled")
+        else:
+            print("⚠️  AMP requested but not available")
+            args.use_amp = False
 
     # Print configuration
     print("\n" + "="*60)
@@ -474,6 +531,8 @@ def main():
     print(f"Optimizer: {args.base_optimizer.upper()}")
     print(f"Betas: {tuple(args.betas)}")
     print(f"Data augmentation: {'Enabled' if args.augment else 'Disabled'}")
+    print(f"Mixed Precision (AMP): {'Enabled' if args.use_amp else 'Disabled'}")
+    print(f"Model Compilation: {'Enabled' if args.compile_model else 'Disabled'}")
     if args.use_sam:
         print(
             f"SAM optimizer: Enabled (rho={args.sam_rho}, adaptive={args.sam_adaptive})")
@@ -502,6 +561,15 @@ def main():
     )
 
     model.to(device)
+    
+    # Model compilation for PyTorch 2.0+ (optional speedup)
+    if args.compile_model and hasattr(torch, 'compile'):
+        try:
+            model = torch.compile(model)
+            print("✅ Model compiled for faster training")
+        except Exception as e:
+            print(f"⚠️  Model compilation failed: {e}")
+    
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     # Create datasets with proper split specification
@@ -512,7 +580,10 @@ def main():
         batch_size=args.batch_size,
         shuffle=True,
         collate_fn=collate_fn,
-        num_workers=4
+        num_workers=min(4, os.cpu_count() or 4),
+        pin_memory=True,
+        prefetch_factor=2,
+        persistent_workers=True
     )
 
     # Create validation dataset from the same data directory
@@ -523,7 +594,10 @@ def main():
         batch_size=args.batch_size,
         shuffle=False,
         collate_fn=collate_fn,
-        num_workers=4
+        num_workers=min(4, os.cpu_count() or 4),
+        pin_memory=True,
+        prefetch_factor=2,
+        persistent_workers=True
     )
 
     # Base optimizer classes
@@ -625,13 +699,13 @@ def main():
         train_loss = train_epoch(
             model, train_loader, optimizer, device, vocab,
             use_sam=args.use_sam, gradient_clip=args.gradient_clip,
-            print_frequency=args.print_frequency
+            print_frequency=args.print_frequency, use_amp=args.use_amp, scaler=scaler
         )
         train_losses.append(train_loss)
         print(f"Train Loss: {train_loss:.4f}")
 
         # Validate
-        val_loss, char_acc = validate(model, val_loader, device, vocab)
+        val_loss, char_acc = validate(model, val_loader, device, vocab, use_amp=args.use_amp)
         val_losses.append(val_loss)
         print(f"Val Loss: {val_loss:.4f}, Char Accuracy: {char_acc:.4f}")
 
