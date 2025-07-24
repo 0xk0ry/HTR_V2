@@ -40,8 +40,8 @@ DEFAULT_NORMALIZATION = {
 }
 DEFAULT_CVT_3STAGE_CONFIG = {
     'embed_dims': [64, 128, 256],
-    'num_heads': [1, 2, 8],
-    'depths': [1, 2, 10],
+    'num_heads': [1, 2, 4],
+    'depths': [1, 2, 4],
     'patch_sizes': [3, 3, 3],
     'strides': [2, 2, 2],
     'kernel_sizes': [3, 3, 3],
@@ -193,8 +193,8 @@ class CvT3Stage(nn.Module):
 
         # Updated configuration to new specification
         embed_dims = [64, 128, 256]   # 64→128→256 channels
-        num_heads = [1, 2, 8]        # 1→2→8 heads (256/8=32 dim per head)
-        depths = [1, 2, 10]           # 1→2→10 blocks
+        num_heads = [1, 2, 4]        # 1→2→4 heads (256/4=64 dim per head)
+        depths = [1, 2, 4]           # 1→2→4 blocks
         patch_sizes = [3, 3, 3]
         strides = [2, 2, 2]           # halve each time: 40x320 → 20x160 → 10x80 → 5x40
         kernel_sizes = [3, 3, 3]
