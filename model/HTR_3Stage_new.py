@@ -39,13 +39,13 @@ DEFAULT_NORMALIZATION = {
     'std': [0.5]
 }
 DEFAULT_CVT_3STAGE_CONFIG = {
-    'embed_dims': [64, 96, 128],
-    'num_heads': [1, 2, 4],
-    'depths': [1, 2, 4],
+    'embed_dims': [64, 128, 256],
+    'num_heads': [1, 2, 8],
+    'depths': [1, 2, 10],
     'patch_sizes': [3, 3, 3],
-    'strides': [2, 2, 1],
+    'strides': [2, 2, 2],
     'kernel_sizes': [3, 3, 3],
-    'mlp_ratios': [2, 2, 2]
+    'mlp_ratios': [4, 4, 4]
 }
 
 # CvT (Convolutional Vision Transformer) Implementation
@@ -186,21 +186,21 @@ class CvTStage(nn.Module):
 class CvT3Stage(nn.Module):
     """3-Stage Convolutional Vision Transformer for HTR with memory optimizations"""
 
-    def __init__(self, img_size=512, in_chans=1, num_classes=1000, use_checkpoint=False):
+    def __init__(self, img_size=320, in_chans=1, num_classes=1000, use_checkpoint=False):
         super().__init__()
         self.num_classes = num_classes
         self.use_checkpoint = use_checkpoint
 
         # Updated configuration to new specification
-        embed_dims = [64, 96, 128]   # 64→96→128 channels
-        num_heads = [1, 2, 4]        # 1→2→4 heads
-        depths = [1, 2, 4]           # 1→2→4 blocks (reduced from 6 to 4 in Stage 3)
+        embed_dims = [64, 128, 256]   # 64→128→256 channels
+        num_heads = [1, 2, 8]        # 1→2→8 heads (256/8=32 dim per head)
+        depths = [1, 2, 10]           # 1→2→10 blocks
         patch_sizes = [3, 3, 3]
-        strides = [2, 2, 1]          # halve twice, then preserve width for CTC
+        strides = [2, 2, 2]           # halve each time: 40x320 → 20x160 → 10x80 → 5x40
         kernel_sizes = [3, 3, 3]
-        mlp_ratios = [2, 2, 2]       # consistent 2x MLP ratios across all stages
+        mlp_ratios = [4, 4, 4]        # 4x MLP ratios across all stages
 
-        # Stage 1: 3×3 conv, 64 channels, stride=2, 1 block (64×512 → 32×256)
+        # Stage 1: 3×3 conv, 64 channels, stride=2, 1 block (40×320 → 20×160)
         self.stage1_embed = PatchEmbed(
             img_size=img_size,
             patch_size=patch_sizes[0],
@@ -223,7 +223,7 @@ class CvT3Stage(nn.Module):
                 use_checkpoint=use_checkpoint and i >= depths[0]//2  # Only checkpoint later blocks
             ))
 
-        # Stage 2: 3×3 conv, 96 channels, stride=2, 2 blocks (32×256 → 16×128)
+        # Stage 2: 3×3 conv, 128 channels, stride=2, 2 blocks (20×160 → 10×80)
         self.stage2_embed = PatchEmbed(
             img_size=None,  # Will be determined dynamically
             patch_size=patch_sizes[1],
@@ -246,7 +246,7 @@ class CvT3Stage(nn.Module):
                 use_checkpoint=use_checkpoint and i >= depths[1]//2  # Only checkpoint later blocks
             ))
 
-        # Stage 3: 3×3 conv, 128 channels, stride=1, 4 blocks (16×128 → 16×128)
+        # Stage 3: 3×3 conv, 256 channels, stride=2, 10 blocks (10×80 → 5×40)
         self.stage3_embed = PatchEmbed(
             img_size=None,  # Will be determined dynamically
             patch_size=patch_sizes[2],
@@ -277,9 +277,9 @@ class CvT3Stage(nn.Module):
     def forward(self, x):
         """Forward pass through all 3 stages"""
         # Use the actual embed_dims from configuration
-        embed_dims = [64, 96, 128]
+        embed_dims = [64, 128, 256]
         
-        # Stage 1: [B, 1, 64, 512] -> [B, H1*W1, 64]
+        # Stage 1: [B, 1, 40, 320] -> [B, H1*W1, 64]
         x, (H1, W1) = self.stage1_embed(x)
         for block in self.stage1_blocks:
             x = block(x, H1, W1)
@@ -287,7 +287,7 @@ class CvT3Stage(nn.Module):
         # Reshape back to 2D for next stage
         x = x.transpose(1, 2).reshape(-1, embed_dims[0], H1, W1)
 
-        # Stage 2: [B, 64, H1, W1] -> [B, H2*W2, 96]
+        # Stage 2: [B, 64, H1, W1] -> [B, H2*W2, 128]
         x, (H2, W2) = self.stage2_embed(x)
         for block in self.stage2_blocks:
             x = block(x, H2, W2)
@@ -295,7 +295,7 @@ class CvT3Stage(nn.Module):
         # Reshape back to 2D for next stage
         x = x.transpose(1, 2).reshape(-1, embed_dims[1], H2, W2)
 
-        # Stage 3: [B, 96, H2, W2] -> [B, H3*W3, 128]
+        # Stage 3: [B, 128, H2, W2] -> [B, H3*W3, 256]
         x, (H3, W3) = self.stage3_embed(x)
         for block in self.stage3_blocks:
             x = block(x, H3, W3)
@@ -308,9 +308,9 @@ class CvT3Stage(nn.Module):
     def forward_features(self, x):
         """Return features without classification head"""
         # Use the actual embed_dims from configuration
-        embed_dims = [64, 96, 128]
+        embed_dims = [64, 128, 256]
         
-        # Stage 1: [B, 1, 64, 512] -> [B, H1*W1, 64]
+        # Stage 1: [B, 1, 40, 320] -> [B, H1*W1, 64]
         x, (H1, W1) = self.stage1_embed(x)
         for block in self.stage1_blocks:
             x = block(x, H1, W1)
@@ -318,7 +318,7 @@ class CvT3Stage(nn.Module):
         # Reshape back to 2D for next stage
         x = x.transpose(1, 2).reshape(-1, embed_dims[0], H1, W1)
 
-        # Stage 2: [B, 64, H1, W1] -> [B, H2*W2, 96]
+        # Stage 2: [B, 64, H1, W1] -> [B, H2*W2, 128]
         x, (H2, W2) = self.stage2_embed(x)
         for block in self.stage2_blocks:
             x = block(x, H2, W2)
@@ -326,7 +326,7 @@ class CvT3Stage(nn.Module):
         # Reshape back to 2D for next stage
         x = x.transpose(1, 2).reshape(-1, embed_dims[1], H2, W2)
 
-        # Stage 3: [B, 96, H2, W2] -> [B, H3*W3, 128]
+        # Stage 3: [B, 128, H2, W2] -> [B, H3*W3, 256]
         x, (H3, W3) = self.stage3_embed(x)
         for block in self.stage3_blocks:
             x = block(x, H3, W3)
@@ -338,12 +338,12 @@ class CvT3Stage(nn.Module):
 class ImageChunker:
     """Handles image chunking with overlapping and padding for 3-stage HTR"""
 
-    def __init__(self, target_height=64, chunk_width=512, first_stride=320, stride=384):
+    def __init__(self, target_height=40, chunk_width=320, first_stride=200, stride=240):
         self.target_height = target_height
         self.chunk_width = chunk_width
-        self.first_stride = first_stride  # 320px for first chunk
-        self.stride = stride  # 384px for subsequent chunks
-        self.padding = 40  # 40px padding as specified
+        self.first_stride = first_stride  # 200px for first chunk
+        self.stride = stride  # 240px for subsequent chunks
+        self.padding = 40  # 40px padding
 
     def preprocess_image(self, image):
         """Resize image to target height while preserving aspect ratio and convert to greyscale"""
@@ -492,8 +492,8 @@ class ImageChunker:
 class HTRModel(nn.Module):
     """Handwritten Text Recognition Model with 3-stage CvT backbone"""
 
-    def __init__(self, vocab_size, max_length=256, target_height=64, chunk_width=512,
-                 first_stride=320, stride=384):
+    def __init__(self, vocab_size, max_length=256, target_height=40, chunk_width=320,
+                 first_stride=200, stride=240):
         super().__init__()
 
         self.vocab_size = vocab_size
@@ -509,13 +509,13 @@ class HTRModel(nn.Module):
             use_checkpoint=True  # Enable gradient checkpointing for memory efficiency
         )
 
-        # MLP head for character prediction (updated to 128-dim features)
-        self.feature_dim = 128  # Updated: Stage 3 now outputs 128 channels (hybrid config)
+        # MLP head for character prediction (updated to 256-dim features)
+        self.feature_dim = 256  # Updated: Stage 3 now outputs 256 channels
         self.classifier = nn.Sequential(
-            nn.Linear(self.feature_dim, 128),  # Hidden layer for memory efficiency
+            nn.Linear(self.feature_dim, 256),  # Hidden layer for memory efficiency
             nn.GELU(),
             nn.Dropout(0.1),
-            nn.Linear(128, vocab_size)
+            nn.Linear(256, vocab_size)
         )
 
         # CTC Loss
@@ -665,11 +665,11 @@ class HTRModel(nn.Module):
 
         device = chunk_features[0].device
 
-        # Calculate final patch stride through all 3 stages: 1 * 2 * 2 = 4
-        final_patch_stride = 1 * 2 * 2  # Stage 1: 1, Stage 2: 2, Stage 3: 2
+        # Calculate final patch stride through all 3 stages: 1 * 2 * 2 * 2 = 8
+        final_patch_stride = 1 * 2 * 2 * 2  # Stage 1: 1, Stage 2: 2, Stage 3: 2, Stage 3: 2
         
         #! ignored patches is correct to handle padding
-        ignore_patches = max(1, self.chunker.padding // final_patch_stride) # 40px padding / 4px stride = 10 patches
+        ignore_patches = max(1, self.chunker.padding // final_patch_stride) # 40px padding / 8px stride = 5 patches
 
         merged_features = []
 

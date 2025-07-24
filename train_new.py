@@ -27,7 +27,7 @@ sys.path.append('.')
 class HTRDataset(Dataset):
     """Dataset class for HTR training"""
 
-    def __init__(self, data_dir, vocab, split='train', max_length=256, target_height=64, augment=False):
+    def __init__(self, data_dir, vocab, split='train', max_length=256, target_height=40, augment=False):
         self.data_dir = Path(data_dir)
         self.vocab = vocab
         self.char_to_idx = {char: idx for idx, char in enumerate(vocab)}
@@ -543,10 +543,10 @@ def main():
     model = HTRModel(
         vocab_size=len(vocab),
         max_length=256,
-        target_height=64,        # Updated to 64px height
-        chunk_width=512,         # Updated to 512px chunks
-        first_stride=320,        # Updated to 320px first stride
-        stride=384               # Updated to 384px subsequent stride
+        target_height=40,        # Updated to 40px height
+        chunk_width=320,         # Updated to 320px chunks
+        first_stride=200,        # Updated to 200px first stride
+        stride=240               # Updated to 240px subsequent stride
     )
 
     model.to(device)
