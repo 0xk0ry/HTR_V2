@@ -18,7 +18,7 @@ DEFAULT_VOCAB = ['<blank>'] + \
         'abcdefghijklmnopqrstuvwxyz'
         'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
         '0123456789'
-        '.,!?;: '
+        '.,!?;: "#&\'()*+-/'
         'àáảãạăằắẳẵặâầấẩẫậ'
         'èéẻẽẹêềếểễệ'
         'ìíỉĩị'
@@ -33,7 +33,7 @@ DEFAULT_VOCAB = ['<blank>'] + \
         'ÙÚỦŨỤƯỪỨỬỮỰ'
         'ỲÝỶỸỴ'
         'Đ'
-    )
+        )
 DEFAULT_NORMALIZATION = {
     'mean': [0.5],  # Greyscale normalization
     'std': [0.5]

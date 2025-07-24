@@ -484,7 +484,8 @@ def main():
     print("="*60)
 
     # Create vocabulary (load from pickle file if available)
-    vocab = create_vocab(data_dir=args.data_dir)
+    # vocab = create_vocab(data_dir=args.data_dir)
+    vocab = DEFAULT_VOCAB
     print(f"Vocabulary size: {len(vocab)}")
 
     # Save vocabulary
