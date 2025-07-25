@@ -384,7 +384,7 @@ def train_epoch(model, dataloader, optimizer, device, vocab, use_sam=False, grad
         num_batches += 1
 
         # Print progress more frequently for feedback
-        if batch_idx % print_frequency == 0 and print_frequency > 0:
+        if print_frequency > 0 and batch_idx % print_frequency == 0:
             print(
                 f"  Batch {batch_idx}/{len(dataloader)}, Loss: {loss.item():.4f}")
 
