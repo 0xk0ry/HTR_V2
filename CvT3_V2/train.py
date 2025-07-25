@@ -17,11 +17,12 @@ from pathlib import Path
 import argparse
 import sys
 import torchvision.transforms as transforms
-from data.transform import (
+from transform import (
     Erosion, Dilation, ElasticDistortion,
     RandomTransform, GaussianNoise, SaltAndPepperNoise,
     Opening, Closing
 )
+
 sys.path.append('.')
 
 

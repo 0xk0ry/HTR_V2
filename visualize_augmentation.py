@@ -2,11 +2,10 @@
 """
 Visualize data augmentation effects on example training data
 """
-
-from CvT3_V2.model.HTR_3Stage import DEFAULT_VOCAB
 from data.transform import (
     Erosion, Dilation, ElasticDistortion,
-    RandomTransform, GaussianNoise
+    RandomTransform, GaussianNoise, SaltAndPepperNoise,
+    Opening, Closing
 )
 import torch
 import numpy as np
@@ -20,7 +19,7 @@ sys.path.append('.')
 
 def load_example_images():
     """Load all images from example_train_data"""
-    data_dir = Path("example_train_data")
+    data_dir = Path("data/test_iam")
     images = []
     texts = []
 
@@ -56,7 +55,37 @@ def apply_single_augmentation(image, aug_type):
     if aug_type == "original":
         return image
     elif aug_type == "affine":
-        transform = RandomTransform(val=15)
+        transform = transforms.RandomAffine(
+            degrees=10,
+            shear=5,
+            resample=Image.BILINEAR
+        )
+        return transform(image)
+    elif aug_type == "perspective":
+        transform = transforms.RandomPerspective(distortion_scale=0.4, p=1.0)
+        return transform(image)
+    elif aug_type == "blur":
+        transform = transforms.GaussianBlur(kernel_size=(3, 7), sigma=(0.1, 1.5))
+        return transform(image)
+    elif aug_type == "salt_pepper":
+        transform = SaltAndPepperNoise(prob=0.02)
+        return transform(image)
+    elif aug_type == "random_erasing":
+        # Convert to tensor for RandomErasing, then back to PIL
+        tensor_transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.RandomErasing(scale=(0.01, 0.08), ratio=(0.3, 3.3), value=0, p=1.0),
+            transforms.ToPILImage()
+        ])
+        return tensor_transform(image)
+    elif aug_type == "color_jitter":
+        transform = transforms.ColorJitter(brightness=0.1, contrast=0.1)
+        return transform(image)
+    elif aug_type == "opening":
+        transform = Opening(kernel=(3, 3))
+        return transform(image)
+    elif aug_type == "closing":
+        transform = Closing(kernel=(3, 3))
         return transform(image)
     elif aug_type == "erosion":
         transform = Erosion(kernel=(2, 2), iterations=1)
@@ -65,13 +94,11 @@ def apply_single_augmentation(image, aug_type):
         transform = Dilation(kernel=(2, 2), iterations=1)
         return transform(image)
     elif aug_type == "noise":
-        transform = GaussianNoise(std=0.15)
+        transform = GaussianNoise(std=5)
         return transform(image)
     elif aug_type == "elastic":
         transform = ElasticDistortion(
-            grid=(6, 6),
-            magnitude=(10, 10),
-            min_sep=(2, 2)
+            grid=(8, 8), magnitude=(1, 1), min_sep=(4, 4)
         )
         return transform(image)
     else:
@@ -94,14 +121,17 @@ def create_augmentation_grid():
     text = texts[0]
     print(f"Using image: '{text}'")
 
-    # Augmentation types to show
-    aug_types = ["original", "affine", "erosion",
-                 "dilation", "noise", "elastic"]
-    aug_names = ["Original", "Affine Transform", "Erosion",
+    # Augmentation types to show (new comprehensive list)
+    aug_types = ["original", "affine", "perspective", "blur", "salt_pepper", 
+                 "random_erasing", "color_jitter", "opening", "closing", 
+                 "erosion", "dilation", "noise", "elastic"]
+    aug_names = ["Original", "Random Affine", "Perspective Warp", "Gaussian Blur", 
+                 "Salt & Pepper Noise", "Random Erasing", "Color Jitter", 
+                 "Morphological Opening", "Morphological Closing", "Erosion", 
                  "Dilation", "Gaussian Noise", "Elastic Distortion"]
 
-    # Create vertical figure (6 rows, 1 column)
-    fig, axes = plt.subplots(len(aug_types), 1, figsize=(12, 18))
+    # Create vertical figure (13 rows, 1 column)
+    fig, axes = plt.subplots(len(aug_types), 1, figsize=(12, 26))
     fig.suptitle(
         f'Data Augmentation Examples: "{text}"', fontsize=16, fontweight='bold')
 
@@ -154,6 +184,77 @@ def create_augmentation_grid():
     return fig
 
 
+def create_pipeline_comparison():
+    """Compare old vs new augmentation pipeline effects"""
+    
+    # Load first example image
+    images, texts = load_example_images()
+    if not images:
+        print("No example images found!")
+        return
+
+    image = resize_to_target_height(images[0], target_height=64)
+    text = texts[0]
+
+    # Define old and new pipeline effects
+    pipelines = [
+        ("Original", []),
+        ("Old Pipeline", ["erosion", "dilation", "elastic", "noise"]),
+        ("New Core Transforms", ["affine", "perspective", "blur", "salt_pepper"]),
+        ("New Full Pipeline", ["affine", "perspective", "blur", "salt_pepper", 
+                              "random_erasing", "color_jitter", "opening"])
+    ]
+
+    # Create vertical figure (4 rows, 1 column)
+    fig, axes = plt.subplots(len(pipelines), 1, figsize=(12, 12))
+    fig.suptitle(
+        f'Pipeline Comparison: "{text}"', fontsize=16, fontweight='bold')
+
+    for idx, (pipeline_name, aug_list) in enumerate(pipelines):
+        # Start with original image
+        result_image = image.copy()
+
+        # Apply each augmentation in sequence
+        for aug_type in aug_list:
+            try:
+                result_image = apply_single_augmentation(result_image, aug_type)
+                # Ensure size consistency
+                if result_image.size[1] != 64:
+                    result_image = resize_to_target_height(result_image, target_height=64)
+            except Exception as e:
+                print(f"Error in pipeline {pipeline_name} with {aug_type}: {e}")
+                continue
+
+        # Convert to numpy for plotting
+        img_array = np.array(result_image)
+
+        # Plot
+        ax = axes[idx]
+        ax.imshow(img_array, cmap='gray', aspect='auto')
+        ax.set_title(pipeline_name, fontsize=14, fontweight='bold', pad=10)
+        ax.axis('off')
+
+        # Add some stats about the image
+        min_val, max_val = img_array.min(), img_array.max()
+        mean_val, std_val = img_array.mean(), img_array.std()
+        ax.text(0.02, 0.02, f"Min: {min_val:.3f}, Max: {max_val:.3f}, Mean: {mean_val:.3f}, Std: {std_val:.3f}",
+                transform=ax.transAxes, fontsize=9,
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8))
+
+    # Adjust layout
+    plt.tight_layout()
+    plt.subplots_adjust(top=0.94)
+
+    # Save the plot
+    output_path = "pipeline_comparison.png"
+    plt.savefig(output_path, dpi=150, bbox_inches='tight', facecolor='white')
+    print(f"Saved pipeline comparison to: {output_path}")
+
+    plt.show()
+
+    return fig
+
+
 def create_combined_augmentation_example():
     """Show an example with multiple augmentations combined in vertical layout"""
 
@@ -166,17 +267,21 @@ def create_combined_augmentation_example():
     image = resize_to_target_height(images[0], target_height=64)
     text = texts[0]
 
-    # Create combinations
+    # Create combinations (updated with new augmentations)
     combinations = [
         ("Original", []),
-        ("Affine + Erosion", ["affine", "erosion"]),
-        ("Dilation + Noise", ["dilation", "noise"]),
-        ("Elastic + Affine + Noise", ["elastic", "affine", "noise"]),
-        ("All Combined", ["affine", "erosion", "dilation", "noise", "elastic"])
+        ("Affine + Blur", ["affine", "blur"]),
+        ("Perspective + Salt&Pepper", ["perspective", "salt_pepper"]),
+        ("Color Jitter + Erosion", ["color_jitter", "erosion"]),
+        ("Random Erasing + Opening", ["random_erasing", "opening"]),
+        ("Elastic + Noise + Dilation", ["elastic", "noise", "dilation"]),
+        ("Full Pipeline (Light)", ["affine", "blur", "salt_pepper", "erosion"]),
+        ("Full Pipeline (Heavy)", ["affine", "perspective", "blur", "salt_pepper", 
+                                   "random_erasing", "color_jitter", "opening", "noise"])
     ]
 
-    # Create vertical figure (5 rows, 1 column)
-    fig, axes = plt.subplots(len(combinations), 1, figsize=(12, 15))
+    # Create vertical figure (8 rows, 1 column)
+    fig, axes = plt.subplots(len(combinations), 1, figsize=(12, 20))
     fig.suptitle(
         f'Combined Augmentation Examples: "{text}"', fontsize=16, fontweight='bold')
 
@@ -241,10 +346,15 @@ def main():
     print("\n2. Creating combined augmentation examples (vertical layout)...")
     create_combined_augmentation_example()
 
+    # Create pipeline comparison
+    print("\n3. Creating pipeline comparison (old vs new)...")
+    create_pipeline_comparison()
+
     print("\n✅ Augmentation visualization completed!")
     print("\nGenerated files:")
     print("  - augmentation_examples.png (individual augmentations, vertical layout)")
     print("  - combined_augmentation_examples.png (combined effects, vertical layout)")
+    print("  - pipeline_comparison.png (old vs new pipeline comparison)")
 
 
 if __name__ == "__main__":
