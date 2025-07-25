@@ -123,7 +123,7 @@ class HTRDataset(Dataset):
         self.aug_transforms = [
             # 1) Geometric: slant, rotate, perspective
             transforms.RandomApply([
-                transforms.RandomAffine(degrees=10, shear=5, resample=Image.BILINEAR)
+                transforms.RandomAffine(degrees=10, shear=5, interpolation=transforms.InterpolationMode.BILINEAR)
             ], p=0.5),
             transforms.RandomApply([
                 transforms.RandomPerspective(distortion_scale=0.4, p=1.0)

@@ -2,6 +2,8 @@
 """
 Visualize data augmentation effects on example training data
 """
+
+from CvT3_V2.model.HTR_3Stage import DEFAULT_VOCAB
 from data.transform import (
     Erosion, Dilation, ElasticDistortion,
     RandomTransform, GaussianNoise, SaltAndPepperNoise,
@@ -19,7 +21,7 @@ sys.path.append('.')
 
 def load_example_images():
     """Load all images from example_train_data"""
-    data_dir = Path("data/test_iam")
+    data_dir = Path("example_train_data")
     images = []
     texts = []
 
