@@ -298,7 +298,7 @@ def train_epoch(model, dataloader, optimizer, device, vocab, use_sam=False, grad
         model.cvt.use_checkpoint = False
 
     # Use mixed precision for faster training
-    scaler = torch.cuda.amp.GradScaler() if torch.cuda.is_available() else None
+    scaler = torch.amp.GradScaler('cuda') if torch.cuda.is_available() else None
 
     for batch_idx, (images, targets, target_lengths) in enumerate(dataloader):
         images = images.to(device, non_blocking=True)

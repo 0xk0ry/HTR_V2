@@ -72,14 +72,6 @@ def apply_single_augmentation(image, aug_type):
     elif aug_type == "salt_pepper":
         transform = SaltAndPepperNoise(prob=0.02)
         return transform(image)
-    elif aug_type == "random_erasing":
-        # Convert to tensor for RandomErasing, then back to PIL
-        tensor_transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.RandomErasing(scale=(0.01, 0.08), ratio=(0.3, 3.3), value=0, p=1.0),
-            transforms.ToPILImage()
-        ])
-        return tensor_transform(image)
     elif aug_type == "color_jitter":
         transform = transforms.ColorJitter(brightness=0.1, contrast=0.1)
         return transform(image)
@@ -123,12 +115,12 @@ def create_augmentation_grid():
     text = texts[0]
     print(f"Using image: '{text}'")
 
-    # Augmentation types to show (new comprehensive list)
+    # Augmentation types to show (updated list without random_erasing)
     aug_types = ["original", "affine", "perspective", "blur", "salt_pepper", 
-                 "random_erasing", "color_jitter", "opening", "closing", 
+                 "color_jitter", "opening", "closing", 
                  "erosion", "dilation", "noise", "elastic"]
     aug_names = ["Original", "Random Affine", "Perspective Warp", "Gaussian Blur", 
-                 "Salt & Pepper Noise", "Random Erasing", "Color Jitter", 
+                 "Salt & Pepper Noise", "Color Jitter", 
                  "Morphological Opening", "Morphological Closing", "Erosion", 
                  "Dilation", "Gaussian Noise", "Elastic Distortion"]
 
@@ -204,7 +196,7 @@ def create_pipeline_comparison():
         ("Old Pipeline", ["erosion", "dilation", "elastic", "noise"]),
         ("New Core Transforms", ["affine", "perspective", "blur", "salt_pepper"]),
         ("New Full Pipeline", ["affine", "perspective", "blur", "salt_pepper", 
-                              "random_erasing", "color_jitter", "opening"])
+                              "color_jitter", "opening"])
     ]
 
     # Create vertical figure (4 rows, 1 column)
@@ -275,11 +267,11 @@ def create_combined_augmentation_example():
         ("Affine + Blur", ["affine", "blur"]),
         ("Perspective + Salt&Pepper", ["perspective", "salt_pepper"]),
         ("Color Jitter + Erosion", ["color_jitter", "erosion"]),
-        ("Random Erasing + Opening", ["random_erasing", "opening"]),
+        ("Opening + Dilation", ["opening", "dilation"]),
         ("Elastic + Noise + Dilation", ["elastic", "noise", "dilation"]),
         ("Full Pipeline (Light)", ["affine", "blur", "salt_pepper", "erosion"]),
         ("Full Pipeline (Heavy)", ["affine", "perspective", "blur", "salt_pepper", 
-                                   "random_erasing", "color_jitter", "opening", "noise"])
+                                   "color_jitter", "opening", "noise"])
     ]
 
     # Create vertical figure (8 rows, 1 column)

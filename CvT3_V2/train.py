@@ -155,12 +155,9 @@ class HTRDataset(Dataset):
                 ])
             ], p=0.3),
 
-            # 5) Occlusion: salt & pepper, random erasing
+            # 5) Occlusion: salt & pepper
             transforms.RandomApply([
                 SaltAndPepperNoise(prob=0.02)
-            ], p=0.3),
-            transforms.RandomApply([
-                transforms.RandomErasing(scale=(0.01,0.08), ratio=(0.3,3.3), value=0, p=1.0)
             ], p=0.3),
 
             # 6) Stroke‐level jitter & sharpen
@@ -325,7 +322,7 @@ def train_epoch(model, dataloader, optimizer, device, vocab, use_sam=False, grad
         model.cvt.use_checkpoint = False
 
     # Use mixed precision for faster training
-    scaler = torch.cuda.amp.GradScaler() if torch.cuda.is_available() else None
+    scaler = torch.amp.GradScaler('cuda') if torch.cuda.is_available() else None
 
     for batch_idx, (images, targets, target_lengths) in enumerate(dataloader):
         images = images.to(device, non_blocking=True)
