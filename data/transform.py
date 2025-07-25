@@ -422,7 +422,7 @@ def get_transform(augment=False):
                 transforms.RandomAffine(
                     degrees=10,             # ±10°
                     shear=5,                # ±5° shear
-                    resample=PIL.Image.BILINEAR
+                    interpolation=transforms.InterpolationMode.BILINEAR
                 )
             ], p=0.5),
 

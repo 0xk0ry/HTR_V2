@@ -422,7 +422,7 @@ def get_transform(augment=False):
                 transforms.RandomAffine(
                     degrees=10,             # ±10°
                     shear=5,                # ±5° shear
-                    resample=PIL.Image.BILINEAR
+                    interpolation=transforms.InterpolationMode.BILINEAR
                 )
             ], p=0.5),
 
@@ -485,6 +485,11 @@ def get_transform(augment=False):
             # Existing photometric distortions
             transforms.RandomApply([
                 GaussianNoise(std=5)
+            ], p=0.3),
+
+            # 8) Sharpen (simulates over-sharpened scans or printing artifacts)
+            transforms.RandomApply([
+                Sharpen(alpha=0.2, strength=1)
             ], p=0.3),
 
             # Final normalization

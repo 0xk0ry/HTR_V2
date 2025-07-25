@@ -20,7 +20,7 @@ import torchvision.transforms as transforms
 from transform import (
     Erosion, Dilation, ElasticDistortion,
     RandomTransform, GaussianNoise, SaltAndPepperNoise,
-    Opening, Closing
+    Opening, Closing, Sharpen
 )
 
 sys.path.append('.')
@@ -121,80 +121,55 @@ class HTRDataset(Dataset):
 
         # Each transform is applied with p=0.5 and can be combined
         self.aug_transforms = [
-            # Random affine transforms (using RandomTransform from transform.py)
-            transforms.RandomApply([RandomTransform(val=10)], p=0.5),
-
-            # Erosion & Dilation
+            # 1) Geometric: slant, rotate, perspective
             transforms.RandomApply([
-                transforms.RandomChoice([
-                    Erosion(kernel=(2, 2), iterations=1),
-                    Dilation(kernel=(2, 2), iterations=1)
-                ])
+                transforms.RandomAffine(degrees=10, shear=5, resample=Image.BILINEAR)
             ], p=0.5),
-
-            # Color jitter (using GaussianNoise for better greyscale compatibility)
-            transforms.RandomApply([
-                GaussianNoise(std=0.1)
-            ], p=0.5),
-
-            # Elastic distortion
-            transforms.RandomApply([
-                ElasticDistortion(
-                    grid=(6, 6),
-                    magnitude=(8, 8),
-                    min_sep=(2, 2)
-                )
-            ], p=0.5),
-
-            # 1) random small rotation / shear (simulates slant)
-            transforms.RandomApply([
-                transforms.RandomAffine(
-                    degrees=10,             # ±10°
-                    shear=5,                # ±5° shear
-                    resample=Image.BILINEAR
-                )
-            ], p=0.5),
-
-            # 2) random perspective warp (simulates page curve / camera angle)
             transforms.RandomApply([
                 transforms.RandomPerspective(distortion_scale=0.4, p=1.0)
-            ], p=0.5),
+            ], p=0.3),
 
-            # 3) random blur (simulates focus/scan blur)
+            # 2) Elastic warp (paper wrinkles / cursive flow)
             transforms.RandomApply([
-                transforms.GaussianBlur(kernel_size=(3, 7), sigma=(0.1, 1.5))
-            ], p=0.5),
+                ElasticDistortion(grid=(6,6), magnitude=(8,8), min_sep=(2,2))
+            ], p=0.3),
 
-            # 4) salt & pepper speckle (simulates ink spots / paper grain)
+            # 3) Photometric: blur, noise, brightness/contrast
             transforms.RandomApply([
-                SaltAndPepperNoise(prob=0.02)
-            ], p=0.5),
-
-            # 5) random erasing / occlusion (simulates smudges, stains)
+                transforms.GaussianBlur(kernel_size=(3,7), sigma=(0.1,1.5))
+            ], p=0.3),
             transforms.RandomApply([
-                transforms.RandomErasing(
-                    scale=(0.01, 0.08),
-                    ratio=(0.3, 3.3),
-                    value=0,   # black occlusion
-                    p=1.0
-                )
-            ], p=0.5),
-
-            # 6) brightness / contrast jitter (simulates lighting & scan variation)
+                GaussianNoise(std=0.1)
+            ], p=0.3),
             transforms.RandomApply([
-                transforms.ColorJitter(
-                    brightness=0.1,
-                    contrast=0.1
-                )
-            ], p=0.5),
+                transforms.ColorJitter(brightness=0.1, contrast=0.1)
+            ], p=0.4),
 
-            # 7) morphological opening/closing (mild stroke thinning/filling)
+            # 4) Morphology: erosion, dilation, opening, closing
             transforms.RandomApply([
                 transforms.RandomChoice([
-                    Opening(kernel=(3, 3)),
-                    Closing(kernel=(3, 3))
+                    Erosion(kernel=(2,2), iterations=1),
+                    Dilation(kernel=(2,2), iterations=1),
+                    Opening(kernel=(3,3)),
+                    Closing(kernel=(3,3)),
                 ])
+            ], p=0.3),
+
+            # 5) Occlusion: salt & pepper, random erasing
+            transforms.RandomApply([
+                SaltAndPepperNoise(prob=0.02)
+            ], p=0.3),
+            transforms.RandomApply([
+                transforms.RandomErasing(scale=(0.01,0.08), ratio=(0.3,3.3), value=0, p=1.0)
+            ], p=0.3),
+
+            # 6) Stroke‐level jitter & sharpen
+            transforms.RandomApply([
+                RandomTransform(val=10),
             ], p=0.5),
+            transforms.RandomApply([
+                Sharpen(alpha=0.5, strength=1),
+            ], p=0.2),
         ]
 
     def __len__(self):
