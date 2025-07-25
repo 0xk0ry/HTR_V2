@@ -384,7 +384,7 @@ def train_epoch(model, dataloader, optimizer, device, vocab, use_sam=False, grad
         num_batches += 1
 
         # Print progress more frequently for feedback
-        if batch_idx % print_frequency == 0:
+        if batch_idx % print_frequency == 0 and print_frequency > 0:
             print(
                 f"  Batch {batch_idx}/{len(dataloader)}, Loss: {loss.item():.4f}")
 
@@ -505,7 +505,7 @@ def main():
     parser.add_argument('--early_stopping', type=int, default=15,
                         help='Early stopping patience (reduced for faster training)')
     parser.add_argument('--print_frequency', type=int,
-                        default=5, help='Print frequency during training (more frequent feedback)')
+                        default=0, help='Print frequency during training (more frequent feedback)')
 
     args = parser.parse_args()
 
