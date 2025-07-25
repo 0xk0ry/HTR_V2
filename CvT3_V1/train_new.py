@@ -316,7 +316,7 @@ def train_epoch(model, dataloader, optimizer, device, vocab, use_sam=False, grad
         if use_sam:
             # Optimized SAM training
             def closure():
-                with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+                with torch.amp.autocast('cuda'enabled=torch.cuda.is_available()):
                     logits, loss = model(images, targets_flat, target_lengths)
                 return loss
 
@@ -336,7 +336,7 @@ def train_epoch(model, dataloader, optimizer, device, vocab, use_sam=False, grad
                 optimizer.step(closure)
         else:
             # Standard training with mixed precision
-            with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+            with torch.amp.autocast('cuda'enabled=torch.cuda.is_available()):
                 logits, loss = model(images, targets_flat, target_lengths)
             
             if scaler:
@@ -537,7 +537,7 @@ def main():
         batch_size=args.batch_size,
         shuffle=True,
         collate_fn=collate_fn,
-        num_workers=12,  # Increased from 8 for even faster data loading
+        num_workers=4,  # Increased from 8 for even faster data loading
         pin_memory=True,  # Faster GPU transfer
         persistent_workers=True,  # Keep workers alive between epochs
         prefetch_factor=4  # Prefetch more batches for smoother training
