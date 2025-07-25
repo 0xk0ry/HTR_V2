@@ -187,6 +187,9 @@ def format_IAM_line():
                 for line_elem in handwritten_part.findall('line'):
                     if line_elem.get('id') == line_id_full:
                         line_text = line_elem.get('text')
+                        # Clean HTML entities
+                        if line_text:
+                            line_text = line_text.replace('&quot;', '"')
                         break
 
             if line_text is None:
@@ -283,6 +286,9 @@ def format_READ2016_line():
                                 x_points.append(int(p.split(",")[0]))
                         elif sub.tag.split("}")[-1] == "TextEquiv":
                             line_label = sub[0].text
+                            # Clean HTML entities
+                            if line_label:
+                                line_label = line_label.replace('&quot;', '"')
                     if line_label is None:
                         continue
                     top, bottom, left, right = np.min(y_points), np.max(
@@ -313,9 +319,9 @@ def pkl2txt(dataset_name):
             os.makedirs(set_folder, exist_ok=True)
             for k, v in a['ground_truth'][i].items():
                 head = k.split('.')[0]
-                text = v['text'].replace('¬', '')
+                text = v['text'].replace('¬', '').replace('&quot;', '"')
                 txt_path = os.path.join(set_folder, f'{head}.txt')
-                with open(txt_path, 'a') as t:
+                with open(txt_path, 'w') as t:
                     t.write(text)
 
 

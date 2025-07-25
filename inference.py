@@ -2,8 +2,8 @@
 Inference script for HTR model with CvT backbone
 """
 
-from model.CTC_Decoder import CTCDecoder
-from model.HTR_3Stage_new import HTRModel, DEFAULT_VOCAB
+from CvT3_V1.model.CTC_Decoder import CTCDecoder
+from CvT3_V1.model.HTR_3Stage import HTRModel, DEFAULT_VOCAB
 import torch
 import json
 import argparse
