@@ -3,7 +3,7 @@ Inference script for HTR model with CvT backbone
 """
 
 from model.CTC_Decoder import CTCDecoder
-from model.HTR_3Stage import HTRModel
+from model.HTR_3Stage_new import HTRModel, DEFAULT_VOCAB
 import torch
 import json
 import argparse
@@ -118,15 +118,16 @@ def load_ground_truth(image_path):
 def load_model_and_vocab(checkpoint_path, device):
     """Load trained model and vocabulary"""
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    vocab = checkpoint['vocab']
+    # vocab = checkpoint['vocab']
+    vocab=DEFAULT_VOCAB
 
     model = HTRModel(
         vocab_size=len(vocab),
         max_length=256,
-        target_height=64,        # Updated to 64px height
-        chunk_width=512,         # Updated to 512px chunks
-        first_stride=320,        # Updated to 320px first stride
-        stride=384               # Updated to 384px subsequent stride
+        target_height=40,        # Updated to 40px height
+        chunk_width=320,         # Updated to 320px chunks
+        first_stride=200,        # Updated to 200px first stride
+        stride=240               # Updated to 240px subsequent stride
     )
 
     model.load_state_dict(checkpoint['model_state_dict'])
