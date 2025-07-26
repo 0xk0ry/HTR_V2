@@ -5,19 +5,18 @@ Training script for HTR model with CvT backbone
 from utils.sam import SAM
 import numpy as np
 from PIL import Image
-from CvT3_V1.model.HTR_3Stage import HTRModel, DEFAULT_VOCAB
+from model.HTR_3Stage import HTRModel, DEFAULT_VOCAB
 import torch.nn.functional as F
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 import os
 import json
-import pickle
 from pathlib import Path
 import argparse
 import sys
 import torchvision.transforms as transforms
-from data.transform import (
+from transform import (
     Erosion, Dilation, ElasticDistortion,
     RandomTransform, GaussianNoise
 )
@@ -287,23 +286,15 @@ def ctc_decode_greedy(logits, vocab):
 
 
 def train_epoch(model, dataloader, optimizer, device, vocab, use_sam=False, gradient_clip=1.0, print_frequency=10):
-    """Train for one epoch with optimized speed"""
+    """Train for one epoch"""
     model.train()
     total_loss = 0
     num_batches = 0
 
-    # Enable gradient checkpointing only when needed for very large models
-    if hasattr(model, 'cvt'):
-        # Disable checkpointing for faster training with sufficient memory
-        model.cvt.use_checkpoint = False
-
-    # Use mixed precision for faster training
-    scaler = torch.amp.GradScaler('cuda') if torch.cuda.is_available() else None
-
     for batch_idx, (images, targets, target_lengths) in enumerate(dataloader):
-        images = images.to(device, non_blocking=True)
-        targets = targets.to(device, non_blocking=True)
-        target_lengths = target_lengths.to(device, non_blocking=True)
+        images = images.to(device)
+        targets = targets.to(device)
+        target_lengths = target_lengths.to(device)
 
         # Flatten targets for CTC loss
         targets_flat = []
@@ -311,57 +302,49 @@ def train_epoch(model, dataloader, optimizer, device, vocab, use_sam=False, grad
             targets_flat.extend(targets[i][:length].tolist())
         targets_flat = torch.tensor(targets_flat, device=device)
 
-        optimizer.zero_grad()
-
         if use_sam:
-            # Optimized SAM training
+            # First forward-backward pass
             def closure():
-                with torch.amp.autocast('cuda'):
-                    logits, loss = model(images, targets_flat, target_lengths)
+                optimizer.zero_grad()
+                logits, loss = model(images, targets_flat, target_lengths)
+                loss.backward()
+                # Gradient clipping
+                if gradient_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), gradient_clip)
                 return loss
 
-            # First forward-backward pass
-            loss = closure()
-            if scaler:
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                if gradient_clip > 0:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                loss.backward()
-                if gradient_clip > 0:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
-                optimizer.step(closure)
+            loss = optimizer.step(closure)
+
+            # Second forward-backward pass
+            logits, loss = model(images, targets_flat, target_lengths)
+            optimizer.zero_grad()
+            loss.backward()
+
+            # Gradient clipping
+            if gradient_clip > 0:
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), gradient_clip)
+
+            optimizer.step()
         else:
-            # Standard training with mixed precision
-            with torch.amp.autocast('cuda'):
-                logits, loss = model(images, targets_flat, target_lengths)
-            
-            if scaler:
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                if gradient_clip > 0:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                loss.backward()
-                if gradient_clip > 0:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
-                optimizer.step()
+            optimizer.zero_grad()
+            logits, loss = model(images, targets_flat, target_lengths)
+            loss.backward()
+
+            # Gradient clipping
+            if gradient_clip > 0:
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), gradient_clip)
+
+            optimizer.step()
 
         total_loss += loss.item()
         num_batches += 1
 
-        # Print progress more frequently for feedback
-        if batch_idx % print_frequency == 0:
-            print(f"  Batch {batch_idx}/{len(dataloader)}, Loss: {loss.item():.4f}")
-
-        # Less frequent cache clearing and optimized memory management
-        if batch_idx % 100 == 0 and torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        # if batch_idx % print_frequency == 0:
+        #     print(
+        #         f'Batch {batch_idx}/{len(dataloader)}, Loss: {loss.item():.4f}')
 
     return total_loss / num_batches
 
@@ -415,13 +398,6 @@ def validate(model, dataloader, device, vocab):
     return avg_loss, char_accuracy
 
 
-def get_memory_usage():
-    """Get current GPU memory usage in MB"""
-    if torch.cuda.is_available():
-        return torch.cuda.memory_allocated() / 1024**2
-    return 0
-
-
 def main():
     parser = argparse.ArgumentParser(description='Train HTR 3-Stage Model')
 
@@ -434,13 +410,12 @@ def main():
     # Training arguments
     parser.add_argument('--epochs', type=int, default=100,
                         help='Number of epochs')
-    parser.add_argument('--batch_size', type=int, default=16,
-                        help='Batch size (increased for better GPU utilization)')  # Increased from 8
-    parser.add_argument('--lr', type=float, default=5e-4, help='Learning rate (increased for faster convergence)')
+    parser.add_argument('--batch_size', type=int, default=8, help='Batch size')
+    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--weight_decay', type=float,
-                        default=0.05, help='Weight decay (increased for better regularization)')
+                        default=0.01, help='Weight decay')
     parser.add_argument('--betas', type=float, nargs=2,
-                        default=[0.9, 0.95], help='Adam betas (optimized for transformers)')
+                        default=[0.9, 0.999], help='Adam betas')
 
     # Optimizer arguments
     parser.add_argument('--base_optimizer', choices=['adamw', 'adam', 'sgd'], default='adamw',
@@ -471,11 +446,11 @@ def main():
 
     # Advanced training options
     parser.add_argument('--gradient_clip', type=float,
-                        default=0.5, help='Gradient clipping value (reduced for stability)')
-    parser.add_argument('--early_stopping', type=int, default=15,
-                        help='Early stopping patience (reduced for faster training)')
+                        default=1.0, help='Gradient clipping value')
+    parser.add_argument('--early_stopping', type=int, default=20,
+                        help='Early stopping patience (0=disabled)')
     parser.add_argument('--print_frequency', type=int,
-                        default=5, help='Print frequency during training (more frequent feedback)')
+                        default=10, help='Print frequency during training')
 
     args = parser.parse_args()
 
@@ -509,7 +484,8 @@ def main():
     print("="*60)
 
     # Create vocabulary (load from pickle file if available)
-    vocab = create_vocab(data_dir=args.data_dir)
+    # vocab = create_vocab(data_dir=args.data_dir)
+    vocab = DEFAULT_VOCAB
     print(f"Vocabulary size: {len(vocab)}")
 
     # Save vocabulary
@@ -537,10 +513,7 @@ def main():
         batch_size=args.batch_size,
         shuffle=True,
         collate_fn=collate_fn,
-        num_workers=4,  # Increased from 8 for even faster data loading
-        pin_memory=True,  # Faster GPU transfer
-        persistent_workers=True,  # Keep workers alive between epochs
-        prefetch_factor=4  # Prefetch more batches for smoother training
+        num_workers=4
     )
 
     # Create validation dataset from the same data directory
@@ -551,8 +524,7 @@ def main():
         batch_size=args.batch_size,
         shuffle=False,
         collate_fn=collate_fn,
-        num_workers=4,  # Fewer workers for validation
-        pin_memory=True
+        num_workers=4
     )
 
     # Base optimizer classes
@@ -622,7 +594,6 @@ def main():
             )
         print(f"Using {args.scheduler_type} learning rate scheduler")
     else:
-        # No scheduler by default - constant learning rate
         scheduler = None
         print("No learning rate scheduler - using constant learning rate")
 
@@ -632,6 +603,14 @@ def main():
         checkpoint = torch.load(args.resume, map_location=device)
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        # Temporarily using only AdamW optimizer
+        optimizer = optim.AdamW(
+            model.parameters(),
+            lr=args.lr,
+            betas=tuple(args.betas),
+            weight_decay=args.weight_decay
+        )
+        print(f"Using AdamW optimizer (temporarily disabled SAM and other optimizers)")
         start_epoch = checkpoint['epoch'] + 1
         print(f"Resumed from epoch {start_epoch}")
 
