@@ -669,7 +669,7 @@ def main():
             }
 
             torch.save(checkpoint, os.path.join(
-                args.save_dir, f'checkpoint_epoch_{epoch+1}.pth'))
+                args.save_dir, f'checkpoint_epoch_{epoch}.pth'))
 
         # Save best model
         if val_loss < best_val_loss:
