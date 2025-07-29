@@ -497,9 +497,9 @@ def main():
 
     # Print configuration
     print("\n" + "="*60)
-    print(f"HTR {args.model_type.upper()} Model Training Configuration")
+    # print(f"HTR {args.model_type.upper()} Model Training Configuration")
+    print("HTR 1-Stage Model Training Configuration")
     print("="*60)
-    print(f"Model type: {args.model_type.upper()}")
     print(f"Data directory: {args.data_dir}")
     print(f"Save directory: {args.save_dir}")
     print(f"Epochs: {args.epochs}")
