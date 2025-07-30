@@ -685,7 +685,7 @@ def main():
     args = parser.parse_args()
 
     # Initialize wandb
-    wandb.init(project="CVT3_V2", config={
+    wandb.init(project="CVT3_V3", config={
         "epochs": args.epochs,
         "batch_size": args.batch_size,
         "learning_rate": args.lr,
