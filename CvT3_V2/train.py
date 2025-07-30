@@ -243,54 +243,30 @@ class HTRDataset(Dataset):
 
         # Each transform is applied with p=0.5 and can be combined
         self.aug_transforms = [
-            # 1) Geometric: slant, rotate, perspective
-            transforms.RandomApply([
-                transforms.RandomAffine(
-                    degrees=10, shear=5, interpolation=transforms.InterpolationMode.BILINEAR)
-            ], p=0.5),
-            transforms.RandomApply([
-                transforms.RandomPerspective(distortion_scale=0.4, p=1.0)
-            ], p=0.3),
+            # Random affine transforms (using RandomTransform from transform.py)
+            transforms.RandomApply([RandomTransform(val=10)], p=0.5),
 
-            # 2) Elastic warp (paper wrinkles / cursive flow)
-            transforms.RandomApply([
-                ElasticDistortion(
-                    grid=(6, 6), magnitude=(8, 8), min_sep=(2, 2))
-            ], p=0.3),
-
-            # 3) Photometric: blur, noise, brightness/contrast
-            transforms.RandomApply([
-                transforms.GaussianBlur(kernel_size=(3, 7), sigma=(0.1, 1.5))
-            ], p=0.3),
-            transforms.RandomApply([
-                GaussianNoise(std=0.1)
-            ], p=0.3),
-            transforms.RandomApply([
-                transforms.ColorJitter(brightness=0.1, contrast=0.1)
-            ], p=0.4),
-
-            # 4) Morphology: erosion, dilation, opening, closing
+            # Erosion & Dilation
             transforms.RandomApply([
                 transforms.RandomChoice([
                     Erosion(kernel=(2, 2), iterations=1),
-                    Dilation(kernel=(2, 2), iterations=1),
-                    Opening(kernel=(3, 3)),
-                    Closing(kernel=(3, 3)),
+                    Dilation(kernel=(2, 2), iterations=1)
                 ])
-            ], p=0.3),
-
-            # 5) Occlusion: salt & pepper
-            transforms.RandomApply([
-                SaltAndPepperNoise(prob=0.02)
-            ], p=0.3),
-
-            # 6) Stroke‐level jitter & sharpen
-            transforms.RandomApply([
-                RandomTransform(val=10),
             ], p=0.5),
+
+            # Color jitter (using GaussianNoise for better greyscale compatibility)
             transforms.RandomApply([
-                Sharpen(alpha=0.5, strength=1),
-            ], p=0.2),
+                GaussianNoise(std=0.1)
+            ], p=0.5),
+
+            # Elastic distortion
+            transforms.RandomApply([
+                ElasticDistortion(
+                    grid=(6, 6),
+                    magnitude=(8, 8),
+                    min_sep=(2, 2)
+                )
+            ], p=0.5),
         ]
 
     def __len__(self):
@@ -516,7 +492,7 @@ def train_epoch(model, dataloader, optimizer, device, vocab, ema=None, criterion
                         model.parameters(), gradient_clip)
                 optimizer.step()
 
-        # Update EMA if provided
+        # Update EMA after each batch
         if ema is not None:
             ema.update(model)
 
