@@ -42,7 +42,7 @@ DEFAULT_NORMALIZATION = {
 class PatchEmbed(nn.Module):
     """Image to Patch Embedding with convolution"""
 
-    def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=576, stride=None, padding=0):
+    def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=768, stride=None, padding=0):
         super().__init__()
         if stride is None:
             stride = patch_size
@@ -200,7 +200,7 @@ class CvT3Stage(nn.Module):
         self.use_checkpoint = use_checkpoint
 
         # Configuration for 64x512 input
-        embed_dims = [64, 192, 576]   # 64→192→576 channels
+        embed_dims = [192, 384, 768] # 64→192→768 channels
         num_heads = [1, 2, 4]        # 1→2→4 heads
         depths = [1, 2, 4]           # 1→2→4 blocks
         patch_sizes = [3, 3, (16, 1)]
@@ -257,7 +257,7 @@ class CvT3Stage(nn.Module):
                 use_checkpoint=use_checkpoint and i >= depths[1]//2
             ))
 
-        # Stage 3: 3×3 conv, 576 channels, stride=2 (16×128 → 8×64)
+        # Stage 3: 3×3 conv, 768 channels, stride=2 (16×128 → 8×64)
         self.stage3_embed = PatchEmbed(
             img_size=None,  # Will be determined dynamically
             patch_size=patch_sizes[2],
@@ -289,7 +289,7 @@ class CvT3Stage(nn.Module):
     def forward(self, x):
         """Forward pass through all 3 stages"""
         # Use the actual embed_dims from configuration
-        embed_dims = [64, 192, 576]
+        embed_dims = [192, 384, 768]
 
         # Stage 1: [B, 1, 64, 512] -> [B, H1*W1, 192]
         x, (H1, W1) = self.stage1_embed(x)
@@ -307,7 +307,7 @@ class CvT3Stage(nn.Module):
         # Reshape back to 2D for next stage
         x = x.transpose(1, 2).reshape(-1, embed_dims[1], H2, W2)
 
-        # Stage 3: [B, 384, H2, W2] -> [B, H3*W3, 576]
+        # Stage 3: [B, 384, H2, W2] -> [B, H3*W3, 768]
         x, (H3, W3) = self.stage3_embed(x)
         for block in self.stage3_blocks:
             x = block(x, H3, W3)
@@ -320,7 +320,7 @@ class CvT3Stage(nn.Module):
     def forward_features(self, x):
         """Return features without classification head"""
         # Use the actual embed_dims from configuration
-        embed_dims = [64, 192, 576]
+        embed_dims = [192, 384, 768]
 
         # Stage 1: [B, 1, 64, 512] -> [B, H1*W1, 192]
         x, (H1, W1) = self.stage1_embed(x)
@@ -338,7 +338,7 @@ class CvT3Stage(nn.Module):
         # Reshape back to 2D for next stage
         x = x.transpose(1, 2).reshape(-1, embed_dims[1], H2, W2)
 
-        # Stage 3: [B, 384, H2, W2] -> [B, H3*W3, 576]
+        # Stage 3: [B, 384, H2, W2] -> [B, H3*W3, 768]
         x, (H3, W3) = self.stage3_embed(x)
         for block in self.stage3_blocks:
             x = block(x, H3, W3)
@@ -429,8 +429,8 @@ class HTRModel(nn.Module):
             use_checkpoint=True  # Enable gradient checkpointing for memory efficiency
         )
 
-        # MLP head for character prediction (576-dim features from Stage 3)
-        self.feature_dim = 576  # Stage 3 outputs 576 channels
+        # MLP head for character prediction (768-dim features from Stage 3)
+        self.feature_dim = 768  # Stage 3 outputs 768 channels
         self.classifier = nn.Sequential(
             # Hidden layer for memory efficiency
             nn.Linear(self.feature_dim, 256),
