@@ -9,6 +9,7 @@ from model.HTR_3Stage import HTRModel, DEFAULT_VOCAB
 import torch.nn.functional as F
 import torch
 import torch.optim as optim
+import copy
 from torch.utils.data import DataLoader, Dataset
 import os
 import json
@@ -26,15 +27,134 @@ from transform import (
 sys.path.append('.')
 
 
+class EMA:
+    """Exponential Moving Average for model parameters"""
+
+    def __init__(self, model, decay=0.9999, warmup_steps=2000):
+        self.decay = decay
+        self.warmup_steps = warmup_steps
+        self.num_updates = 0
+
+        # Create EMA model (deep copy)
+        self.ema_model = copy.deepcopy(model)
+        self.ema_model.eval()
+
+        # Disable gradients for EMA model
+        for param in self.ema_model.parameters():
+            param.requires_grad = False
+
+    def update(self, model):
+        """Update EMA parameters"""
+        self.num_updates += 1
+
+        # Compute decay factor with warmup
+        decay = min(self.decay, (1 + self.num_updates) /
+                    (10 + self.num_updates))
+        if self.num_updates < self.warmup_steps:
+            decay = self.num_updates / self.warmup_steps * self.decay
+
+        # Update EMA parameters
+        with torch.no_grad():
+            for ema_param, model_param in zip(self.ema_model.parameters(), model.parameters()):
+                ema_param.mul_(decay).add_(model_param, alpha=1 - decay)
+
+    def state_dict(self):
+        """Get EMA model state dict"""
+        return {
+            'ema_model': self.ema_model.state_dict(),
+            'decay': self.decay,
+            'num_updates': self.num_updates,
+        }
+
+    def load_state_dict(self, state_dict):
+        """Load EMA model state dict"""
+        self.ema_model.load_state_dict(state_dict['ema_model'])
+        self.decay = state_dict.get('decay', self.decay)
+        self.num_updates = state_dict.get('num_updates', 0)
+
+    def apply_shadow(self, model):
+        """Apply EMA weights to model (for inference)"""
+        with torch.no_grad():
+            for model_param, ema_param in zip(model.parameters(), self.ema_model.parameters()):
+                model_param.copy_(ema_param)
+
+    def restore(self, model, backup_params):
+        """Restore original model weights"""
+        with torch.no_grad():
+            for model_param, backup_param in zip(model.parameters(), backup_params):
+                model_param.copy_(backup_param)
+
+
+class LabelSmoothingCTCLoss(torch.nn.Module):
+    """CTC Loss with label smoothing"""
+
+    def __init__(self, blank_idx=0, smoothing=0.1, reduction='mean', zero_infinity=True):
+        super().__init__()
+        self.blank_idx = blank_idx
+        self.smoothing = smoothing
+        self.reduction = reduction
+        self.zero_infinity = zero_infinity
+        self.ctc_loss = torch.nn.CTCLoss(
+            blank=blank_idx, reduction='none', zero_infinity=zero_infinity)
+
+    def forward(self, log_probs, targets, input_lengths, target_lengths):
+        """
+        Args:
+            log_probs: [T, B, C] log probabilities
+            targets: [sum(target_lengths)] target sequences
+            input_lengths: [B] lengths of input sequences
+            target_lengths: [B] lengths of target sequences
+        """
+        batch_size = log_probs.size(1)
+        vocab_size = log_probs.size(2)
+
+        # Compute standard CTC loss
+        ctc_loss = self.ctc_loss(
+            log_probs, targets, input_lengths, target_lengths)
+
+        if self.smoothing > 0:
+            # Apply label smoothing
+            # Create uniform distribution over vocabulary (excluding blank)
+            uniform_dist = torch.ones_like(log_probs) / (vocab_size - 1)
+            uniform_dist[:, :, self.blank_idx] = 0  # Exclude blank token
+
+            # Compute KL divergence with uniform distribution
+            kl_loss = torch.nn.functional.kl_div(
+                log_probs, uniform_dist, reduction='none', log_target=False
+            ).sum(dim=-1)  # [T, B]
+
+            # Average over time dimension, weighted by input lengths
+            kl_loss_batch = []
+            for i in range(batch_size):
+                seq_len = input_lengths[i]
+                kl_loss_batch.append(kl_loss[:seq_len, i].mean())
+            kl_loss_batch = torch.stack(kl_loss_batch)
+
+            # Combine CTC loss and smoothing loss
+            loss = (1 - self.smoothing) * ctc_loss + \
+                self.smoothing * kl_loss_batch
+        else:
+            loss = ctc_loss
+
+        # Apply reduction
+        if self.reduction == 'mean':
+            return loss.mean()
+        elif self.reduction == 'sum':
+            return loss.sum()
+        else:
+            return loss
+
+
 class HTRDataset(Dataset):
     """Dataset class for HTR training"""
 
-    def __init__(self, data_dir, vocab, split='train', max_length=256, target_height=40, augment=False):
+    def __init__(self, data_dir, vocab, split='train', max_length=256, target_height=64, target_width=512, augment=False):
         self.data_dir = Path(data_dir)
         self.vocab = vocab
         self.char_to_idx = {char: idx for idx, char in enumerate(vocab)}
         self.max_length = max_length
         self.target_height = target_height
+        self.target_width = target_width
         self.augment = augment
         self.split = split  # 'train', 'valid', or 'test'
 
@@ -123,7 +243,8 @@ class HTRDataset(Dataset):
         self.aug_transforms = [
             # 1) Geometric: slant, rotate, perspective
             transforms.RandomApply([
-                transforms.RandomAffine(degrees=10, shear=5, interpolation=transforms.InterpolationMode.BILINEAR)
+                transforms.RandomAffine(
+                    degrees=10, shear=5, interpolation=transforms.InterpolationMode.BILINEAR)
             ], p=0.5),
             transforms.RandomApply([
                 transforms.RandomPerspective(distortion_scale=0.4, p=1.0)
@@ -131,12 +252,13 @@ class HTRDataset(Dataset):
 
             # 2) Elastic warp (paper wrinkles / cursive flow)
             transforms.RandomApply([
-                ElasticDistortion(grid=(6,6), magnitude=(8,8), min_sep=(2,2))
+                ElasticDistortion(
+                    grid=(6, 6), magnitude=(8, 8), min_sep=(2, 2))
             ], p=0.3),
 
             # 3) Photometric: blur, noise, brightness/contrast
             transforms.RandomApply([
-                transforms.GaussianBlur(kernel_size=(3,7), sigma=(0.1,1.5))
+                transforms.GaussianBlur(kernel_size=(3, 7), sigma=(0.1, 1.5))
             ], p=0.3),
             transforms.RandomApply([
                 GaussianNoise(std=0.1)
@@ -148,10 +270,10 @@ class HTRDataset(Dataset):
             # 4) Morphology: erosion, dilation, opening, closing
             transforms.RandomApply([
                 transforms.RandomChoice([
-                    Erosion(kernel=(2,2), iterations=1),
-                    Dilation(kernel=(2,2), iterations=1),
-                    Opening(kernel=(3,3)),
-                    Closing(kernel=(3,3)),
+                    Erosion(kernel=(2, 2), iterations=1),
+                    Dilation(kernel=(2, 2), iterations=1),
+                    Opening(kernel=(3, 3)),
+                    Closing(kernel=(3, 3)),
                 ])
             ], p=0.3),
 
@@ -178,11 +300,9 @@ class HTRDataset(Dataset):
         # Load image and convert to greyscale (as required by 3-stage model)
         image = Image.open(sample['image_path']).convert('L')
 
-        # Resize to target height while maintaining aspect ratio
-        w, h = image.size
-        aspect_ratio = w / h
-        new_width = int(self.target_height * aspect_ratio)
-        image = image.resize((new_width, self.target_height), Image.LANCZOS)
+        # Resize to exact target dimensions (64x512)
+        image = image.resize(
+            (self.target_width, self.target_height), Image.LANCZOS)
 
         # Apply data augmentation if enabled
         if self.augment:
@@ -192,12 +312,10 @@ class HTRDataset(Dataset):
             # Ensure image is still the correct size after augmentation
             # Some transforms might change dimensions slightly
             current_w, current_h = image.size
-            if current_h != self.target_height:
-                # Resize back to target height, maintaining aspect ratio
-                aspect_ratio = current_w / current_h
-                new_width = int(self.target_height * aspect_ratio)
+            if current_h != self.target_height or current_w != self.target_width:
+                # Resize back to target dimensions
                 image = image.resize(
-                    (new_width, self.target_height), Image.LANCZOS)
+                    (self.target_width, self.target_height), Image.LANCZOS)
 
         # Convert to tensor and normalize for greyscale
         image_array = np.array(image) / 255.0
@@ -227,17 +345,8 @@ def collate_fn(batch):
     texts = [item['text'] for item in batch]
     text_lengths = [item['text_length'] for item in batch]
 
-    # Pad images to same width (greyscale: 1 channel)
-    max_width = max(img.size(-1) for img in images)  # Last dimension is width
-    padded_images = []
-    for img in images:
-        # img shape should be [1, H, W] for greyscale
-        channels, height, width = img.shape
-        padded = torch.zeros(channels, height, max_width)
-        padded[:, :, :width] = img
-        padded_images.append(padded)
-
-    images = torch.stack(padded_images)
+    # Stack images directly since they're all the same size (64x512)
+    images = torch.stack(images)
 
     # Pad texts to same length
     max_text_len = max(text_lengths)
@@ -310,8 +419,8 @@ def ctc_decode_greedy(logits, vocab):
     return decoded_texts
 
 
-def train_epoch(model, dataloader, optimizer, device, vocab, use_sam=False, gradient_clip=1.0, print_frequency=10):
-    """Train for one epoch with optimized speed"""
+def train_epoch(model, dataloader, optimizer, device, vocab, ema=None, criterion=None, use_sam=False, gradient_clip=1.0, print_frequency=10):
+    """Train for one epoch with EMA and label smoothing"""
     model.train()
     total_loss = 0
     num_batches = 0
@@ -322,7 +431,8 @@ def train_epoch(model, dataloader, optimizer, device, vocab, use_sam=False, grad
         model.cvt.use_checkpoint = False
 
     # Use mixed precision for faster training
-    scaler = torch.amp.GradScaler('cuda') if torch.cuda.is_available() else None
+    scaler = torch.amp.GradScaler(
+        'cuda') if torch.cuda.is_available() else None
 
     for batch_idx, (images, targets, target_lengths) in enumerate(dataloader):
         images = images.to(device, non_blocking=True)
@@ -338,24 +448,40 @@ def train_epoch(model, dataloader, optimizer, device, vocab, use_sam=False, grad
         optimizer.zero_grad()
 
         if use_sam:
-            # Optimized SAM training
+            # SAM training requires special handling
             def closure():
-                with torch.amp.autocast('cuda'):
-                    logits, loss = model(images, targets_flat, target_lengths)
+                optimizer.zero_grad()
+                with torch.amp.autocast('cuda') if scaler else torch.no_grad():
+                    if criterion is not None:
+                        # Use custom loss function with label smoothing
+                        logits, input_lengths = model(images)
+                        log_probs = torch.nn.functional.log_softmax(
+                            logits, dim=-1)
+                        loss = criterion(log_probs, targets_flat,
+                                         input_lengths, target_lengths)
+                    else:
+                        # Use model's built-in loss
+                        logits, loss = model(
+                            images, targets_flat, target_lengths)
+                
+                if scaler:
+                    scaler.scale(loss).backward()
+                else:
+                    loss.backward()
                 return loss
 
             # First forward-backward pass
             loss = closure()
+            
+            # SAM step with closure
             if scaler:
-                scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
                 if gradient_clip > 0:
                     torch.nn.utils.clip_grad_norm_(
                         model.parameters(), gradient_clip)
-                scaler.step(optimizer)
+                scaler.step(optimizer, closure)
                 scaler.update()
             else:
-                loss.backward()
                 if gradient_clip > 0:
                     torch.nn.utils.clip_grad_norm_(
                         model.parameters(), gradient_clip)
@@ -363,7 +489,15 @@ def train_epoch(model, dataloader, optimizer, device, vocab, use_sam=False, grad
         else:
             # Standard training with mixed precision
             with torch.amp.autocast('cuda'):
-                logits, loss = model(images, targets_flat, target_lengths)
+                if criterion is not None:
+                    # Use custom loss function with label smoothing
+                    logits, input_lengths = model(images)
+                    log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+                    loss = criterion(log_probs, targets_flat,
+                                     input_lengths, target_lengths)
+                else:
+                    # Use model's built-in loss
+                    logits, loss = model(images, targets_flat, target_lengths)
 
             if scaler:
                 scaler.scale(loss).backward()
@@ -380,6 +514,10 @@ def train_epoch(model, dataloader, optimizer, device, vocab, use_sam=False, grad
                         model.parameters(), gradient_clip)
                 optimizer.step()
 
+        # Update EMA if provided
+        if ema is not None:
+            ema.update(model)
+
         total_loss += loss.item()
         num_batches += 1
 
@@ -395,8 +533,15 @@ def train_epoch(model, dataloader, optimizer, device, vocab, use_sam=False, grad
     return total_loss / num_batches
 
 
-def validate(model, dataloader, device, vocab):
-    """Validate the model"""
+def validate(model, dataloader, device, vocab, ema=None, use_ema=True):
+    """Validate the model with optional EMA"""
+
+    # Store original parameters if using EMA
+    original_params = None
+    if ema is not None and use_ema:
+        original_params = [param.clone() for param in model.parameters()]
+        ema.apply_shadow(model)
+
     model.eval()
     total_loss = 0
     total_chars = 0
@@ -441,6 +586,10 @@ def validate(model, dataloader, device, vocab):
     char_accuracy = correct_chars / max(total_chars, 1)
     avg_loss = total_loss / num_batches
 
+    # Restore original parameters if using EMA
+    if ema is not None and use_ema and original_params is not None:
+        ema.restore(model, original_params)
+
     return avg_loss, char_accuracy
 
 
@@ -481,6 +630,18 @@ def main():
                         default=0.05, help='SAM rho parameter')
     parser.add_argument('--sam_adaptive', action='store_true',
                         help='Use adaptive SAM')
+
+    # EMA arguments
+    parser.add_argument('--use_ema', action='store_true',
+                        help='Use Exponential Moving Average')
+    parser.add_argument('--ema_decay', type=float, default=0.9999,
+                        help='EMA decay rate')
+    parser.add_argument('--ema_warmup_steps', type=int, default=2000,
+                        help='EMA warmup steps')
+
+    # Label smoothing arguments
+    parser.add_argument('--label_smoothing', type=float, default=0.0,
+                        help='Label smoothing factor (0.0 = no smoothing)')
 
     # Scheduler arguments
     parser.add_argument('--use_scheduler', action='store_true',
@@ -532,6 +693,11 @@ def main():
     if args.use_sam:
         print(
             f"SAM optimizer: Enabled (rho={args.sam_rho}, adaptive={args.sam_adaptive})")
+    if args.use_ema:
+        print(
+            f"EMA: Enabled (decay={args.ema_decay}, warmup={args.ema_warmup_steps})")
+    if args.label_smoothing > 0:
+        print(f"Label smoothing: Enabled (factor={args.label_smoothing})")
     if args.use_scheduler:
         print(
             f"Scheduler: {args.scheduler_type} (warmup_epochs={args.warmup_epochs})")
@@ -539,7 +705,8 @@ def main():
     print("="*60)
 
     # Create vocabulary (load from pickle file if available)
-    vocab = create_vocab(data_dir=args.data_dir)
+    # vocab = create_vocab(data_dir=args.data_dir)
+    vocab = DEFAULT_VOCAB
     print(f"Vocabulary size: {len(vocab)}")
 
     # Save vocabulary
@@ -550,18 +717,35 @@ def main():
     model = HTRModel(
         vocab_size=len(vocab),
         max_length=256,
-        target_height=40,        # Updated to 40px height
-        chunk_width=320,         # Updated to 320px chunks
-        first_stride=200,        # Updated to 200px first stride
-        stride=240               # Updated to 240px subsequent stride
+        target_height=64,        # Updated to 64px height
+        target_width=512         # Updated to 512px width
     )
 
     model.to(device)
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
+    # Create EMA if enabled
+    ema = None
+    if args.use_ema:
+        ema = EMA(model, decay=args.ema_decay,
+                  warmup_steps=args.ema_warmup_steps)
+        print(
+            f"EMA enabled with decay={args.ema_decay}, warmup_steps={args.ema_warmup_steps}")
+
+    # Create label smoothing loss if enabled
+    criterion = None
+    if args.label_smoothing > 0:
+        criterion = LabelSmoothingCTCLoss(
+            blank_idx=0,
+            smoothing=args.label_smoothing,
+            reduction='mean',
+            zero_infinity=True
+        )
+        print(f"Label smoothing enabled with factor={args.label_smoothing}")
+
     # Create datasets with proper split specification
     train_dataset = HTRDataset(
-        args.data_dir, vocab, split='train', augment=args.augment)
+        args.data_dir, vocab, split='train', target_height=64, target_width=512, augment=args.augment)
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
@@ -575,7 +759,7 @@ def main():
 
     # Create validation dataset from the same data directory
     val_dataset = HTRDataset(
-        args.data_dir, vocab, split='valid', augment=False)
+        args.data_dir, vocab, split='valid', target_height=64, target_width=512, augment=False)
     val_loader = DataLoader(
         val_dataset,
         batch_size=args.batch_size,
@@ -661,8 +845,14 @@ def main():
         checkpoint = torch.load(args.resume, map_location=device)
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if scheduler and 'scheduler_state_dict' in checkpoint and checkpoint['scheduler_state_dict']:
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        if ema and 'ema_state_dict' in checkpoint and checkpoint['ema_state_dict']:
+            ema.load_state_dict(checkpoint['ema_state_dict'])
         start_epoch = checkpoint['epoch'] + 1
         print(f"Resumed from epoch {start_epoch}")
+        if ema:
+            print(f"EMA state restored from checkpoint")
 
     # Training loop with improved features
     best_val_loss = float('inf')
@@ -681,6 +871,7 @@ def main():
         # Train
         train_loss = train_epoch(
             model, train_loader, optimizer, device, vocab,
+            ema=ema, criterion=criterion,
             use_sam=args.use_sam, gradient_clip=args.gradient_clip,
             print_frequency=args.print_frequency
         )
@@ -688,7 +879,8 @@ def main():
         print(f"Train Loss: {train_loss:.4f}")
 
         # Validate
-        val_loss, char_acc = validate(model, val_loader, device, vocab)
+        val_loss, char_acc = validate(
+            model, val_loader, device, vocab, ema=ema, use_ema=args.use_ema)
         val_losses.append(val_loss)
         print(f"Val Loss: {val_loss:.4f}, Char Accuracy: {char_acc:.4f}")
 
@@ -710,6 +902,7 @@ def main():
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
+                'ema_state_dict': ema.state_dict() if ema else None,
                 'train_loss': train_loss,
                 'val_loss': val_loss,
                 'train_losses': train_losses,
@@ -731,6 +924,7 @@ def main():
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
+                'ema_state_dict': ema.state_dict() if ema else None,
                 'train_loss': train_loss,
                 'val_loss': val_loss,
                 'train_losses': train_losses,

@@ -118,8 +118,8 @@ def load_ground_truth(image_path):
 def load_model_and_vocab(checkpoint_path, device):
     """Load trained model and vocabulary"""
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    # vocab = checkpoint['vocab']
-    vocab=DEFAULT_VOCAB
+    vocab = checkpoint['vocab']
+    # vocab=DEFAULT_VOCAB
 
     model = HTRModel(
         vocab_size=len(vocab),
