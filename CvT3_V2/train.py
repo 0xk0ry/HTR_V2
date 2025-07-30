@@ -23,6 +23,8 @@ from transform import (
     RandomTransform, GaussianNoise, SaltAndPepperNoise,
     Opening, Closing, Sharpen
 )
+import wandb
+import editdistance
 
 sys.path.append('.')
 
@@ -463,7 +465,7 @@ def train_epoch(model, dataloader, optimizer, device, vocab, ema=None, criterion
                         # Use model's built-in loss
                         logits, loss = model(
                             images, targets_flat, target_lengths)
-                
+
                 if scaler:
                     scaler.scale(loss).backward()
                 else:
@@ -472,7 +474,7 @@ def train_epoch(model, dataloader, optimizer, device, vocab, ema=None, criterion
 
             # First forward-backward pass
             loss = closure()
-            
+
             # SAM step with closure
             if scaler:
                 scaler.unscale_(optimizer)
@@ -547,6 +549,8 @@ def validate(model, dataloader, device, vocab, ema=None, use_ema=True):
     total_chars = 0
     correct_chars = 0
     num_batches = 0
+    cer_total = 0
+    wer_total = 0
 
     with torch.no_grad():
         for images, targets, target_lengths in dataloader:
@@ -564,8 +568,14 @@ def validate(model, dataloader, device, vocab, ema=None, use_ema=True):
             total_loss += loss.item()
             num_batches += 1
 
-            # Decode predictions for accuracy calculation
+            # Decode predictions for CER and WER calculation
             predictions = ctc_decode_greedy(logits, vocab)
+            target_texts = [''.join([vocab[idx] for idx in targets[i][:target_lengths[i].item(
+            )].cpu().numpy()]) for i in range(len(targets))]
+
+            # Calculate CER and WER
+            cer_total += calculate_cer(predictions, target_texts)
+            wer_total += calculate_wer(predictions, target_texts)
 
             # Calculate character accuracy
             for i, (pred, target_len) in enumerate(zip(predictions, target_lengths)):
@@ -585,12 +595,40 @@ def validate(model, dataloader, device, vocab, ema=None, use_ema=True):
 
     char_accuracy = correct_chars / max(total_chars, 1)
     avg_loss = total_loss / num_batches
+    avg_cer = cer_total / num_batches
+    avg_wer = wer_total / num_batches
 
     # Restore original parameters if using EMA
     if ema is not None and use_ema and original_params is not None:
         ema.restore(model, original_params)
 
-    return avg_loss, char_accuracy
+    return avg_loss, char_accuracy, avg_cer, avg_wer
+
+
+def calculate_cer(predictions, targets):
+    """Calculate Character Error Rate (CER)"""
+    total_chars = 0
+    total_errors = 0
+
+    for pred, target in zip(predictions, targets):
+        total_chars += len(target)
+        total_errors += editdistance.eval(pred, target)
+
+    return total_errors / total_chars if total_chars > 0 else 0
+
+
+def calculate_wer(predictions, targets):
+    """Calculate Word Error Rate (WER)"""
+    total_words = 0
+    total_errors = 0
+
+    for pred, target in zip(predictions, targets):
+        pred_words = pred.split()
+        target_words = target.split()
+        total_words += len(target_words)
+        total_errors += editdistance.eval(pred_words, target_words)
+
+    return total_errors / total_words if total_words > 0 else 0
 
 
 def get_memory_usage():
@@ -669,6 +707,23 @@ def main():
                         default=0, help='Print frequency during training (more frequent feedback)')
 
     args = parser.parse_args()
+
+    # Initialize wandb
+    wandb.init(project="CVT3_V2", config={
+        "epochs": args.epochs,
+        "batch_size": args.batch_size,
+        "learning_rate": args.lr,
+        "weight_decay": args.weight_decay,
+        "optimizer": args.base_optimizer,
+        "gradient_clip": args.gradient_clip,
+        "label_smoothing": args.label_smoothing,
+        "use_ema": args.use_ema,
+        "ema_decay": args.ema_decay,
+        "ema_warmup_steps": args.ema_warmup_steps,
+        "use_scheduler": args.use_scheduler,
+        "scheduler_type": args.scheduler_type,
+        "warmup_epochs": args.warmup_epochs
+    })
 
     # Create save directory
     os.makedirs(args.save_dir, exist_ok=True)
@@ -879,10 +934,22 @@ def main():
         print(f"Train Loss: {train_loss:.4f}")
 
         # Validate
-        val_loss, char_acc = validate(
+        val_loss, char_acc, avg_cer, avg_wer = validate(
             model, val_loader, device, vocab, ema=ema, use_ema=args.use_ema)
         val_losses.append(val_loss)
         print(f"Val Loss: {val_loss:.4f}, Char Accuracy: {char_acc:.4f}")
+
+        # Log CER and WER to wandb
+        wandb.log({
+            "train_loss": train_loss,
+            "val_loss": val_loss,
+            "char_accuracy": char_acc,
+            "cer": avg_cer,
+            "wer": avg_wer
+        })
+
+        # Print CER and WER
+        print(f"CER: {avg_cer:.4f}, WER: {avg_wer:.4f}")
 
         # Learning rate scheduling
         if scheduler:
